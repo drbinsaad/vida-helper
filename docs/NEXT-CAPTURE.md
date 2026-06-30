@@ -5,11 +5,11 @@ where you want the helper to act.
 
 ## Capture Steps
 
-1. Install `userscripts/vida-helper.user.js`.
+1. Install `userscripts/vida-dashboard-helper.user.js`.
 2. Log in to VIDA normally.
 3. Go to the exact page you want automated.
 4. Tap or click the floating `VIDA` button.
-5. Press `Copy Snapshot`.
+5. Press `Copy Page Snapshot`.
 6. Paste it back into the chat after checking it is sanitized.
 
 ## What The Snapshot Contains

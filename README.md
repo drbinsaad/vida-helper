@@ -6,9 +6,10 @@ Safe starter kit for building a VIDA browser helper that can run on:
 - Safari on iPhone, through the Userscripts app.
 - Safari/Chrome on Mac, through a userscript manager.
 
-The current script is intentionally read-only. It inspects the current VIDA page,
-shows route/login/API activity, and captures a sanitized DOM snapshot so the real
-workflow can be built without exposing patient data.
+The current dashboard script is a safe workflow helper. It highlights VIDA
+fields/buttons, captures sanitized snapshots, and can insert your own saved
+quick-text templates into free-text fields. It does not click Add, Continue, or
+Save for patient-record actions.
 
 ## What I learned from the public app
 
@@ -26,8 +27,9 @@ workflow can be built without exposing patient data.
 
 ## Files
 
-- `userscripts/vida-helper.user.js`: install this in Tampermonkey or iPhone
-  Safari Userscripts.
+- `userscripts/vida-dashboard-helper.user.js`: install this in Tampermonkey or
+  iPhone Safari Userscripts for the active workflow helper.
+- `userscripts/vida-helper.user.js`: older snapshot-only starter script.
 - `chrome-extension/`: unpacked Chrome extension version.
 - `docs/INSTALL-MAC.md`: Mac install steps.
 - `docs/INSTALL-IPHONE.md`: iPhone install steps.
@@ -36,7 +38,9 @@ workflow can be built without exposing patient data.
 ## Next Build Step
 
 After installing the userscript, log in to VIDA, go to the exact page you want to
-automate, press `VIDA` in the floating panel, then press `Copy Snapshot`.
+speed up, and use the floating `VIDA Helper` panel. For autofill, click a
+free-text field, type a reusable phrase once, press `Save Field`, then use
+`Insert Text` later to draft it into the active field for manual review.
 
 Paste that snapshot back here after checking it has no patient name, MRN, phone,
 or ID number. Then I can build the exact action script for your workflow.

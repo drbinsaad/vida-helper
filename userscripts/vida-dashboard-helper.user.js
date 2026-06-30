@@ -1,18 +1,20 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.8.0
+// @version      1.9.0
 // @description  Workflow helper for VIDA dashboard and OPD details. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  const VERSION = "1.8.0";
+  const VERSION = "1.9.0";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -20,6 +22,14 @@
   const KEYBOARD_INSTALLED_KEY = "__vidaHelperKeyboardInstalled";
   const PANEL_POSITION_KEY = "__vidaHelperPanelPosition";
   const PANEL_COLLAPSED_KEY = "__vidaHelperPanelCollapsed";
+  const QUICK_TEXT_KEY = "__vidaHelperQuickTexts";
+  const QUICK_TEXT_FIELD_NAMES = [
+    "hopi",
+    "currentMedication",
+    "chiefComplaintRemarks",
+    "remarks",
+    "prescriptionInstruction",
+  ];
   const PRESCRIPTION_FIELD_NAMES = [
     "item",
     "dose",
@@ -740,6 +750,256 @@
     return null;
   }
 
+  function getQuickTexts() {
+    let parsed = [];
+    try {
+      parsed = JSON.parse(getQuickTextStorageRaw());
+    } catch (_error) {
+      parsed = [];
+    }
+
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => ({
+        id: String(item && item.id || ""),
+        name: norm(item && item.name || "").slice(0, 60),
+        text: String(item && item.text || "").slice(0, 4000),
+      }))
+      .filter((item) => item.id && item.name && item.text);
+  }
+
+  function setQuickTexts(items) {
+    setQuickTextStorageRaw(JSON.stringify(items.slice(0, 40)));
+    refreshQuickTextSelect();
+  }
+
+  function getQuickTextStorageRaw() {
+    if (typeof GM_getValue === "function") return GM_getValue(QUICK_TEXT_KEY, "[]");
+    return localStorage.getItem(QUICK_TEXT_KEY) || "[]";
+  }
+
+  function setQuickTextStorageRaw(value) {
+    if (typeof GM_setValue === "function") {
+      GM_setValue(QUICK_TEXT_KEY, value);
+      return;
+    }
+    localStorage.setItem(QUICK_TEXT_KEY, value);
+  }
+
+  function getFieldName(el) {
+    return String(el && (el.getAttribute("formcontrolname") || el.getAttribute("name") || "") || "");
+  }
+
+  function isQuickTextTarget(el) {
+    if (!el || !visible(el)) return false;
+    if (el.disabled || el.readOnly) return false;
+    if (el.isContentEditable) return true;
+    const tag = String(el.tagName || "").toLowerCase();
+    const type = String(el.getAttribute("type") || "text").toLowerCase();
+    const name = getFieldName(el);
+    if (tag === "textarea") return !name || QUICK_TEXT_FIELD_NAMES.includes(name);
+    if (tag !== "input") return false;
+    if (!["", "text", "search"].includes(type)) return false;
+    if (QUICK_TEXT_FIELD_NAMES.includes(name)) return true;
+    const label = `${el.getAttribute("placeholder") || ""} ${name}`.toLowerCase();
+    return /\b(remark|instruction|complaint|history|note)\b/i.test(label);
+  }
+
+  function getQuickTextTarget() {
+    if (isQuickTextTarget(document.activeElement)) return document.activeElement;
+
+    const activeModule = getActiveModuleName();
+    let preferred = [];
+    if (activeModule === "History / HOPI") preferred = ["hopi", "currentMedication", "chiefComplaintRemarks"];
+    else if (activeModule === "Orders / Prescriptions") preferred = ["prescriptionInstruction"];
+    else if (activeModule === "Assessment / Diagnosis") preferred = ["remarks"];
+    else if (activeModule === "Sick Leave") preferred = ["remarks"];
+    else if (activeModule === "Chief Complaint") preferred = ["chiefComplaintRemarks", "hopi"];
+
+    const namedTarget = getFirstFieldByNames(preferred);
+    if (isQuickTextTarget(namedTarget)) return namedTarget;
+
+    return Array.from(document.querySelectorAll("textarea,input,[contenteditable='true']"))
+      .filter(isQuickTextTarget)[0] || null;
+  }
+
+  function getEditableText(el) {
+    if (!el) return "";
+    if (el.isContentEditable) return el.innerText || el.textContent || "";
+    return String(el.value || "");
+  }
+
+  function setNativeValue(el, value) {
+    const tag = String(el && el.tagName || "").toLowerCase();
+    if (tag !== "input" && tag !== "textarea") {
+      el.textContent = value;
+      return;
+    }
+
+    const prototype = tag === "textarea" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+    if (descriptor && descriptor.set) descriptor.set.call(el, value);
+    else el.value = value;
+  }
+
+  function dispatchTextEvents(el, text) {
+    try {
+      el.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: text,
+      }));
+    } catch (_error) {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function insertTextIntoField(el, text) {
+    if (!el || !text) return false;
+    el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+
+    if (el.isContentEditable) {
+      const selection = window.getSelection && window.getSelection();
+      if (selection && selection.rangeCount && el.contains(selection.anchorNode)) {
+        document.execCommand("insertText", false, text);
+      } else {
+        const current = getEditableText(el).trim();
+        el.textContent = current ? `${current}\n${text}` : text;
+      }
+      dispatchTextEvents(el, text);
+      return true;
+    }
+
+    const current = getEditableText(el);
+    const start = typeof el.selectionStart === "number" ? el.selectionStart : current.length;
+    const end = typeof el.selectionEnd === "number" ? el.selectionEnd : current.length;
+    const separator = start === current.length && current.trim() ? "\n" : "";
+    const next = `${current.slice(0, start)}${separator}${text}${current.slice(end)}`;
+    setNativeValue(el, next);
+    const cursor = start + separator.length + text.length;
+    if (typeof el.setSelectionRange === "function") el.setSelectionRange(cursor, cursor);
+    dispatchTextEvents(el, text);
+    return true;
+  }
+
+  function refreshQuickTextSelect(panel) {
+    const root = panel || document.getElementById(PANEL_ID);
+    if (!root) return;
+    const select = root.querySelector(".vida-template-select");
+    if (!select) return;
+
+    const selected = select.value;
+    select.innerHTML = "";
+    const items = getQuickTexts();
+    if (!items.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved text";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }
+
+    select.disabled = false;
+    for (const item of items) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.name;
+      select.appendChild(option);
+    }
+    if (items.some((item) => item.id === selected)) select.value = selected;
+  }
+
+  function getSelectedQuickText() {
+    const select = document.querySelector(`#${PANEL_ID} .vida-template-select`);
+    const id = select && select.value;
+    return getQuickTexts().find((item) => item.id === id) || null;
+  }
+
+  function focusQuickTextTarget() {
+    const target = getQuickTextTarget();
+    if (!target) {
+      setStatus("No safe free-text field found");
+      return false;
+    }
+    return focusElement(target, getFieldName(target) || "free-text field");
+  }
+
+  function insertQuickText() {
+    const item = getSelectedQuickText();
+    if (!item) {
+      setStatus("Save a text template first");
+      return;
+    }
+
+    const target = getQuickTextTarget();
+    if (!target) {
+      setStatus("Click a free-text field first");
+      return;
+    }
+
+    insertTextIntoField(target, item.text);
+    target.style.outline = "4px solid #2563eb";
+    target.style.outlineOffset = "3px";
+    setStatus(`Inserted "${item.name}" draft; review before saving`);
+  }
+
+  function saveCurrentFieldAsQuickText() {
+    const target = getQuickTextTarget();
+    if (!target) {
+      setStatus("Click a free-text field with text first");
+      return;
+    }
+
+    const text = getEditableText(target).trim();
+    if (!text) {
+      setStatus("Current field is empty");
+      return;
+    }
+
+    if (redact(text) !== text) {
+      const ok = window.confirm("This text may contain patient identifiers. Save it as a reusable template anyway?");
+      if (!ok) {
+        setStatus("Template not saved");
+        return;
+      }
+    }
+
+    const defaultName = getFieldName(target) || "Quick text";
+    const name = norm(window.prompt("Template name. Do not include patient identifiers.", defaultName) || "").slice(0, 60);
+    if (!name) {
+      setStatus("Template name cancelled");
+      return;
+    }
+
+    const items = getQuickTexts().filter((item) => item.name.toLowerCase() !== name.toLowerCase());
+    items.unshift({
+      id: String(Date.now()),
+      name,
+      text: text.slice(0, 4000),
+    });
+    setQuickTexts(items);
+
+    const select = document.querySelector(`#${PANEL_ID} .vida-template-select`);
+    if (select) select.value = items[0].id;
+    setStatus(`Saved "${name}"`);
+  }
+
+  function deleteSelectedQuickText() {
+    const item = getSelectedQuickText();
+    if (!item) {
+      setStatus("No saved text selected");
+      return;
+    }
+
+    const ok = window.confirm(`Delete "${item.name}"?`);
+    if (!ok) return;
+    setQuickTexts(getQuickTexts().filter((current) => current.id !== item.id));
+    setStatus(`Deleted "${item.name}"`);
+  }
+
   function focusPatientSearch() {
     return focusElement(getFieldsByName("patientMRN")[0] || getPlaceholderControls("Patient MRN")[0], "patient MRN search");
   }
@@ -1229,8 +1489,9 @@
     if (window[KEYBOARD_INSTALLED_KEY]) return;
     window[KEYBOARD_INSTALLED_KEY] = true;
     document.addEventListener("keydown", (event) => {
-      if (!event.altKey || !event.shiftKey || isTypingTarget(event.target)) return;
+      if (!event.altKey || !event.shiftKey) return;
       const key = String(event.key || "").toLowerCase();
+      if (isTypingTarget(event.target) && key !== "t") return;
       if (key === "n") {
         event.preventDefault();
         nextSafeStep();
@@ -1243,6 +1504,9 @@
       } else if (key === "r") {
         event.preventDefault();
         checkPrescriptionFields();
+      } else if (key === "t") {
+        event.preventDefault();
+        insertQuickText();
       } else if (key === "d") {
         event.preventDefault();
         goDashboard();
@@ -1414,6 +1678,16 @@
         min-height: 30px;
         font-size: 12px;
       }
+      #${PANEL_ID} .vida-template-select {
+        width: 100%;
+        min-height: 32px;
+        border: 1px solid #ccc;
+        border-radius: 7px;
+        background: #fff;
+        color: #222;
+        padding: 4px 6px;
+        font-size: 12px;
+      }
       #${PANEL_ID} .vida-status {
         min-height: 18px;
         font-size: 12px;
@@ -1439,6 +1713,13 @@
         <button type="button" data-action="next-safe">Next Safe Step</button>
         <button type="button" data-action="focus-current">Focus Current Field</button>
         <button type="button" data-action="check-rx">Check Rx Fields</button>
+        <select class="vida-template-select" aria-label="Saved quick text"></select>
+        <div class="vida-quick">
+          <button type="button" data-action="insert-text">Insert Text</button>
+          <button type="button" data-action="save-text">Save Field</button>
+          <button type="button" data-action="focus-text">Find Text</button>
+          <button type="button" data-action="delete-text">Delete Text</button>
+        </div>
         <div class="vida-quick">
           <button type="button" data-nav="Vitals">Vitals</button>
           <button type="button" data-nav="Chief Complaint">Chief</button>
@@ -1476,6 +1757,10 @@
     panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
     panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
     panel.querySelector('[data-action="check-rx"]').addEventListener("click", checkPrescriptionFields);
+    panel.querySelector('[data-action="insert-text"]').addEventListener("click", insertQuickText);
+    panel.querySelector('[data-action="save-text"]').addEventListener("click", saveCurrentFieldAsQuickText);
+    panel.querySelector('[data-action="focus-text"]').addEventListener("click", focusQuickTextTarget);
+    panel.querySelector('[data-action="delete-text"]').addEventListener("click", deleteSelectedQuickText);
     for (const button of panel.querySelectorAll("[data-nav]")) {
       button.addEventListener("click", () => clickSafeNav(button.getAttribute("data-nav")));
     }
@@ -1493,6 +1778,7 @@
     panel.querySelector('[data-action="size"]').addEventListener("click", setPageSize100);
     panel.querySelector('[data-action="refresh"]').addEventListener("click", clickRefresh);
     panel.querySelector('[data-action="dashboard"]').addEventListener("click", goDashboard);
+    refreshQuickTextSelect(panel);
   }
 
   function updateCounts() {
