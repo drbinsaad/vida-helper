@@ -44,9 +44,10 @@ speed up, and use the floating `VIDA Helper` panel. For autofill, click a
 free-text field, type a reusable phrase once, press `Save Field`, then use
 `Insert Text` later to draft it into the active field for manual review. For
 common medications, open a prescription drawer after choosing the medication and
-details, press `Save Rx`, then later use `Find Med`, `Apply Rx`, and `Copy Rx`
-to speed up drafting while keeping Add/Save manual. On the `Previous
-Prescriptions` list, tap a previous prescription card, then use `Copy Prev` or
+details, press `Save Rx`, then later use `Find Item`, `Apply Rx`, and `Copy Rx`
+to speed up drafting while keeping Add/Save manual. `Find Item` also focuses the
+procedure search on the `Orders` tab, but Rx drafts stay limited to
+`Prescriptions`. On the `Previous Prescriptions` list, tap a previous prescription card, then use `Copy Prev` or
 `Mark Prev`; the `Refill` click stays manual.
 
 Paste that snapshot back here after checking it has no patient name, MRN, phone,

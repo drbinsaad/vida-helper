@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.11.1
+// @version      1.11.2
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.11.1";
+  const VERSION = "1.11.2";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -679,6 +679,7 @@
     return {
       ordersTabs: findExactElementsByText("Orders").length,
       prescriptionTabs: findExactElementsByText("Prescriptions").length,
+      activeOrderEntryMode: getActiveOrderEntryMode(),
       itemFields: Array.from(document.querySelectorAll('[formcontrolname="item"]')).filter(visible).length,
       searchFavoriteFields: getPlaceholderControls("Search Favorite").length,
       searchPrescriptionFields: getPlaceholderControls("Search for Prescriptions").length,
@@ -955,6 +956,43 @@
     return cleanRxFieldValue((valueLabel && (valueLabel.innerText || valueLabel.textContent)) || field.innerText || field.textContent || "");
   }
 
+  function getActivePlanSubtabText() {
+    return Array.from(document.querySelectorAll(".nav-link.active,[role='tab'].active,[aria-selected='true']"))
+      .filter(visible)
+      .map(textOf)
+      .find((text) => text === "Orders" || text === "Prescriptions") || "";
+  }
+
+  function getItemSearchField() {
+    const itemField = getRxFieldElement("item");
+    const itemInput = getNestedVisibleInput(itemField);
+    if (itemInput) return itemInput;
+    return getPlaceholderControls("Search for Prescriptions")[0] ||
+      getPlaceholderControls("Search for Procedures")[0] ||
+      getPlaceholderControls("Search Favorite")[0] ||
+      itemField;
+  }
+
+  function getItemSearchPlaceholder() {
+    const field = getItemSearchField();
+    return norm(field && field.getAttribute && field.getAttribute("placeholder"));
+  }
+
+  function getActiveOrderEntryMode() {
+    const placeholder = getItemSearchPlaceholder();
+    if (/prescriptions?/i.test(placeholder)) return "prescription";
+    if (/procedures?/i.test(placeholder)) return "order";
+
+    const activeSubtab = getActivePlanSubtabText();
+    if (activeSubtab === "Prescriptions") return "prescription";
+    if (activeSubtab === "Orders") return "order";
+
+    const prescriptionOnlyFields = ["strength", "route", "frequency", "doseTime", "duration", "prescriptionInstruction"];
+    if (prescriptionOnlyFields.some((name) => getRxFieldElement(name))) return "prescription";
+    if (findButtonsByText("Previous Prescriptions").length) return "prescription";
+    return "";
+  }
+
   function captureCurrentRxDraftFields() {
     const fields = {};
     for (const name of RX_PRESET_FIELD_NAMES) {
@@ -964,8 +1002,10 @@
   }
 
   function isPrescriptionContextVisible() {
-    return getActiveModuleName() === "Orders / Prescriptions" ||
-      RX_PRESET_FIELD_NAMES.some((name) => getRxFieldElement(name)) ||
+    const mode = getActiveOrderEntryMode();
+    if (mode === "order") return false;
+    return mode === "prescription" ||
+      RX_PRESET_FIELD_NAMES.some((name) => name !== "item" && getRxFieldElement(name)) ||
       getPlaceholderControls("Search for Prescriptions").length > 0;
   }
 
@@ -1004,6 +1044,10 @@
   }
 
   function saveCurrentRxPreset() {
+    if (getActiveOrderEntryMode() === "order") {
+      setStatus("Orders tab uses Find Item; Rx drafts are for Prescriptions");
+      return;
+    }
     if (!isPrescriptionContextVisible()) {
       setStatus("Open the prescription drawer first");
       return;
@@ -1123,29 +1167,52 @@
   }
 
   function getMedicationSearchField() {
-    const itemField = getRxFieldElement("item");
-    const itemInput = getNestedVisibleInput(itemField);
-    if (itemInput) return itemInput;
-    return getPlaceholderControls("Search for Prescriptions")[0] ||
-      getPlaceholderControls("Search Favorite")[0] ||
-      getPlaceholderControls("Search")[0] ||
-      itemField;
+    return getItemSearchField();
+  }
+
+  function draftItemSearchQuery(target, query) {
+    if (!target || !query) return "none";
+    const tag = String(target.tagName || "").toLowerCase();
+    if ((tag === "input" || tag === "textarea") && !target.disabled && !target.readOnly) {
+      const current = cleanRxFieldValue(target.value || "");
+      if (!current) {
+        setNativeValue(target, query);
+        dispatchTextEvents(target, query);
+        flashFieldOutline(target);
+        return "typed";
+      }
+      if (current === cleanRxFieldValue(query)) return "already";
+      return "copied";
+    }
+    return "copied";
   }
 
   function focusMedicationSearch() {
     const target = getMedicationSearchField();
     if (!target) {
-      setStatus("Medication search field not found");
+      setStatus("Medication/order search field not found");
       return false;
     }
 
+    const mode = getActiveOrderEntryMode();
+    const label = mode === "order" ? "order/procedure search" : "medication search";
     const item = getSelectedRxPreset();
-    const query = item && (item.fields.item || item.name);
-    focusElement(target, "medication search");
+    const query = mode === "prescription" && item ? item.fields.item || item.name : "";
+    focusElement(target, label);
     if (!query) return true;
+
+    const result = draftItemSearchQuery(target, query);
+    if (result === "typed") {
+      setStatus("Typed medication search; choose exact result manually");
+      return true;
+    }
+    if (result === "already") {
+      setStatus("Medication search already typed; choose exact result manually");
+      return true;
+    }
     copy(query)
-      .then(() => setStatus(`Medication name copied; paste/search and select manually`))
-      .catch(() => setStatus("Focused medication search"));
+      .then(() => setStatus("Medication name copied; paste/search and select manually"))
+      .catch(() => setStatus(`Focused ${label}`));
     return true;
   }
 
@@ -1153,6 +1220,10 @@
     const item = getSelectedRxPreset();
     if (!item) {
       setStatus("Save an Rx draft first");
+      return;
+    }
+    if (getActiveOrderEntryMode() === "order") {
+      setStatus("Switch to Prescriptions before applying an Rx draft");
       return;
     }
     if (!isPrescriptionContextVisible()) {
@@ -2761,7 +2832,7 @@
           <button type="button" data-action="save-rx">Save Rx</button>
           <button type="button" data-action="apply-rx">Apply Rx</button>
           <button type="button" data-action="copy-rx">Copy Rx</button>
-          <button type="button" data-action="focus-rx">Find Med</button>
+          <button type="button" data-action="focus-rx">Find Item</button>
           <button type="button" data-action="delete-rx">Delete Rx</button>
           <button type="button" data-action="copy-prev-rx">Copy Prev</button>
           <button type="button" data-action="mark-prev-rx">Mark Prev</button>
