@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.11.2
+// @version      1.12.0
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.11.2";
+  const VERSION = "1.12.0";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -26,6 +26,7 @@
   const QUICK_TEXT_KEY = "__vidaHelperQuickTexts";
   const MODULE_DEFAULT_KEY = "__vidaHelperModuleDefaults";
   const RX_PRESET_KEY = "__vidaHelperRxPresets";
+  const DX_PRESET_KEY = "__vidaHelperDxPresets";
   const EXPANSION_INSTALLED_KEY = "__vidaHelperExpansionInstalled";
   const QUICK_TEXT_TRIGGER_SIGIL = "/";
   const MAX_TRIGGER_LENGTH = 24;
@@ -172,6 +173,29 @@
     "complexDiagnosis",
     "remarks",
   ];
+  const DX_PRESET_FIELD_NAMES = [
+    "icdCode10ID",
+    "ascii_Desc",
+    "conditionID",
+    "diagnosisTypeID",
+    "complexDiagnosis",
+    "remarks",
+  ];
+  const DX_REVIEW_FIELD_NAMES = [
+    "icdCode10ID",
+    "ascii_Desc",
+    "conditionID",
+    "diagnosisTypeID",
+    "complexDiagnosis",
+  ];
+  const DX_FIELD_LABELS = {
+    icdCode10ID: "ICD",
+    ascii_Desc: "ICD description",
+    conditionID: "condition",
+    diagnosisTypeID: "type",
+    complexDiagnosis: "complex diagnosis",
+    remarks: "remarks",
+  };
   const PATIENT_LIST_FIELD_NAMES = [
     "patientMRN",
     "dateFrom",
@@ -1275,6 +1299,322 @@
     const reviewText = review.length ? `; review ${review.join(", ")}` : "";
     const copiedText = medicationQuery ? "; med name copied" : "";
     setStatus(`${filledText}${skippedText}${missingText}${reviewText}${copiedText}; Add/Save manual`);
+  }
+
+  function getDxPresetStorageRaw() {
+    if (typeof GM_getValue === "function") return GM_getValue(DX_PRESET_KEY, "[]");
+    return localStorage.getItem(DX_PRESET_KEY) || "[]";
+  }
+
+  function setDxPresetStorageRaw(value) {
+    if (typeof GM_setValue === "function") {
+      GM_setValue(DX_PRESET_KEY, value);
+      return;
+    }
+    localStorage.setItem(DX_PRESET_KEY, value);
+  }
+
+  function cleanDxFieldValue(value) {
+    return cleanRxFieldValue(value);
+  }
+
+  function dxLabel(name) {
+    return DX_FIELD_LABELS[name] || name;
+  }
+
+  function getDxPresets() {
+    let parsed = [];
+    try {
+      parsed = JSON.parse(getDxPresetStorageRaw());
+    } catch (_error) {
+      parsed = [];
+    }
+
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        const fields = {};
+        const sourceFields = item && item.fields && typeof item.fields === "object" ? item.fields : {};
+        for (const name of DX_PRESET_FIELD_NAMES) {
+          fields[name] = cleanDxFieldValue(sourceFields[name] || "").slice(0, 1500);
+        }
+        return {
+          id: String(item && item.id || ""),
+          name: norm(item && item.name || "").slice(0, 60),
+          fields,
+          updatedAt: String(item && item.updatedAt || ""),
+        };
+      })
+      .filter((item) => item.id && item.name && Object.values(item.fields).some(Boolean));
+  }
+
+  function setDxPresets(items) {
+    setDxPresetStorageRaw(JSON.stringify(items.slice(0, 40)));
+    refreshDxPresetSelect();
+  }
+
+  function getAssessmentFieldElement(name) {
+    const fields = getFieldsByName(name).filter(isForegroundElement);
+    if (fields.length) return fields[0];
+    return getFieldsByName(name)[0] || null;
+  }
+
+  function getAssessmentFieldValue(name) {
+    const field = getAssessmentFieldElement(name);
+    if (!field) return "";
+    const tag = String(field.tagName || "").toLowerCase();
+    const input = getNestedVisibleInput(field);
+    if (name === "complexDiagnosis" || String(field.getAttribute("type") || "").toLowerCase() === "checkbox") {
+      const checkbox = tag === "input" ? field : field.querySelector("input[type='checkbox']");
+      return checkbox && checkbox.checked ? "checked" : "";
+    }
+    if (tag === "select") {
+      return cleanDxFieldValue(Array.from(field.selectedOptions || []).map((option) => option.textContent).join(" "));
+    }
+    if (tag === "input" || tag === "textarea") return cleanDxFieldValue(field.value || "");
+    if (input && input.value) return cleanDxFieldValue(input.value);
+    const valueLabel = field.querySelector(".ng-value-label,.ng-select-container,.mat-select-value,.select2-selection__rendered");
+    return cleanDxFieldValue((valueLabel && (valueLabel.innerText || valueLabel.textContent)) || field.innerText || field.textContent || "");
+  }
+
+  function captureCurrentDxDraftFields() {
+    const fields = {};
+    for (const name of DX_PRESET_FIELD_NAMES) {
+      fields[name] = getAssessmentFieldValue(name);
+    }
+    return fields;
+  }
+
+  function isAssessmentContextVisible() {
+    return getActiveModuleName() === "Assessment / Diagnosis" ||
+      DX_PRESET_FIELD_NAMES.some((name) => getAssessmentFieldElement(name)) ||
+      getPlaceholderControls("Select ICD Code").length > 0;
+  }
+
+  function refreshDxPresetSelect(panel) {
+    const root = panel || document.getElementById(PANEL_ID);
+    if (!root) return;
+    const select = root.querySelector(".vida-dx-select");
+    if (!select) return;
+
+    const selected = select.value;
+    select.innerHTML = "";
+    const items = getDxPresets();
+    if (!items.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved Dx";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }
+
+    select.disabled = false;
+    for (const item of items) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.name;
+      select.appendChild(option);
+    }
+    if (items.some((item) => item.id === selected)) select.value = selected;
+  }
+
+  function getSelectedDxPreset() {
+    const select = document.querySelector(`#${PANEL_ID} .vida-dx-select`);
+    const id = select && select.value;
+    return getDxPresets().find((item) => item.id === id) || null;
+  }
+
+  function getDxSearchQuery(item) {
+    if (!item) return "";
+    return cleanDxFieldValue(item.fields.icdCode10ID || item.fields.ascii_Desc || item.name);
+  }
+
+  function saveCurrentDxPreset() {
+    if (!isAssessmentContextVisible()) {
+      setStatus("Open Assessment first");
+      return;
+    }
+
+    const fields = captureCurrentDxDraftFields();
+    if (!Object.values(fields).some(Boolean)) {
+      setStatus("No assessment fields found to save");
+      return;
+    }
+
+    if (Object.values(fields).some(isPatientIdentifierRisk)) {
+      const ok = window.confirm("This Dx draft may contain patient identifiers. Save as reusable assessment text anyway?");
+      if (!ok) {
+        setStatus("Dx draft not saved");
+        return;
+      }
+    }
+
+    const defaultName = fields.ascii_Desc || fields.icdCode10ID || fields.remarks || "Dx draft";
+    const name = norm(window.prompt("Dx draft name. Do not include patient identifiers.", defaultName) || "").slice(0, 60);
+    if (!name) {
+      setStatus("Dx draft name cancelled");
+      return;
+    }
+
+    const existingItems = getDxPresets();
+    const existing = existingItems.find((item) => item.name.toLowerCase() === name.toLowerCase());
+    const savedItem = {
+      id: existing ? existing.id : String(Date.now()),
+      name,
+      fields,
+      updatedAt: new Date().toISOString(),
+    };
+    setDxPresets([savedItem].concat(existingItems.filter((item) => item.name.toLowerCase() !== name.toLowerCase())));
+
+    const select = document.querySelector(`#${PANEL_ID} .vida-dx-select`);
+    if (select) select.value = savedItem.id;
+    setStatus(`Saved Dx draft "${name}"`);
+  }
+
+  function deleteSelectedDxPreset() {
+    const item = getSelectedDxPreset();
+    if (!item) {
+      setStatus("No Dx draft selected");
+      return;
+    }
+
+    const ok = window.confirm(`Delete Dx draft "${item.name}"?`);
+    if (!ok) return;
+    setDxPresets(getDxPresets().filter((current) => current.id !== item.id));
+    setStatus(`Deleted Dx draft "${item.name}"`);
+  }
+
+  function getIcdSearchField() {
+    const field = getAssessmentFieldElement("icdCode10ID");
+    const input = getNestedVisibleInput(field);
+    if (input) return input;
+    return getPlaceholderControls("Select ICD Code")[0] ||
+      getPlaceholderControls("ICD")[0] ||
+      field;
+  }
+
+  function setAssessmentRemarks(value, replaceExisting) {
+    const field = getAssessmentFieldElement("remarks");
+    const input = getNestedVisibleInput(field);
+    if (!input || !value) return "missing";
+    const current = cleanDxFieldValue(input.value || "");
+    if (current && current !== cleanDxFieldValue(value) && !replaceExisting) return "skipped";
+    setNativeValue(input, value);
+    dispatchTextEvents(input, value);
+    flashFieldOutline(input);
+    return "filled";
+  }
+
+  function markDxReviewField(name) {
+    const field = getAssessmentFieldElement(name);
+    if (!field) return false;
+    field.style.outline = name === "icdCode10ID" ? "4px solid #2563eb" : "3px solid #ea580c";
+    field.style.outlineOffset = "2px";
+    field.title = `VIDA helper: review ${name} manually`;
+    return true;
+  }
+
+  function markDxRecordActions() {
+    let count = 0;
+    for (const label of ["Add", "Reset", "Save", "SAVE"]) {
+      for (const control of uniqueElements([...findButtonsByText(label), ...findExactElementsByText(label)])) {
+        const writesRecord = label === "Add" || label === "Save" || label === "SAVE";
+        control.style.outline = writesRecord ? "4px solid #dc2626" : "3px solid #64748b";
+        control.style.outlineOffset = "2px";
+        control.title = writesRecord
+          ? `VIDA helper: ${label} changes the patient record; click manually after review`
+          : `VIDA helper detected: ${label}`;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  function focusIcdSearch() {
+    const target = getIcdSearchField();
+    if (!target) {
+      setStatus("ICD search field not found");
+      return false;
+    }
+
+    const item = getSelectedDxPreset();
+    const query = getDxSearchQuery(item);
+    focusElement(target, "ICD search");
+    if (!query) return true;
+
+    const result = draftItemSearchQuery(target, query);
+    if (result === "typed") {
+      setStatus("Typed ICD search; choose exact ICD manually");
+      return true;
+    }
+    if (result === "already") {
+      setStatus("ICD search already typed; choose exact ICD manually");
+      return true;
+    }
+    copy(query)
+      .then(() => setStatus("ICD query copied; paste/search and select manually"))
+      .catch(() => setStatus("Focused ICD search"));
+    return true;
+  }
+
+  function formatDxPreset(item) {
+    if (!item) return "";
+    const lines = [`Dx draft: ${item.name}`];
+    for (const name of DX_PRESET_FIELD_NAMES) {
+      const value = item.fields[name];
+      if (value) lines.push(`${dxLabel(name)}: ${value}`);
+    }
+    lines.push("Review ICD, condition, type, Add, and Save in VIDA manually.");
+    return lines.join("\n");
+  }
+
+  function copySelectedDxPreset() {
+    const item = getSelectedDxPreset();
+    if (!item) {
+      setStatus("Save a Dx draft first");
+      return;
+    }
+    copy(formatDxPreset(item))
+      .then(() => setStatus(`Copied Dx draft "${item.name}"`))
+      .catch((error) => setStatus(`Copy failed: ${error && error.message || error}`));
+  }
+
+  function applySelectedDxPreset() {
+    const item = getSelectedDxPreset();
+    if (!item) {
+      setStatus("Save a Dx draft first");
+      return;
+    }
+    if (!isAssessmentContextVisible()) {
+      setStatus("Open Assessment before applying Dx");
+      return;
+    }
+
+    const remarksValue = item.fields.remarks;
+    const remarksField = getAssessmentFieldElement("remarks");
+    const remarksInput = getNestedVisibleInput(remarksField);
+    const conflict = remarksValue && remarksInput && cleanDxFieldValue(remarksInput.value || "") &&
+      cleanDxFieldValue(remarksInput.value || "") !== cleanDxFieldValue(remarksValue);
+    let replaceExisting = true;
+    if (conflict) {
+      replaceExisting = window.confirm("Replace current assessment remarks?");
+    }
+
+    const result = setAssessmentRemarks(remarksValue, replaceExisting);
+    const review = [];
+    for (const name of DX_REVIEW_FIELD_NAMES) {
+      if (markDxReviewField(name)) review.push(dxLabel(name));
+    }
+    markDxRecordActions();
+
+    const query = getDxSearchQuery(item);
+    if (query) copy(query).catch(() => {});
+
+    const remarksText = result === "filled" ? "Drafted remarks" : result === "skipped" ? "Kept existing remarks" : "No remarks drafted";
+    const reviewText = review.length ? `; review ${review.join(", ")}` : "";
+    const copiedText = query ? "; ICD query copied" : "";
+    setStatus(`${remarksText}${reviewText}${copiedText}; Add/Save manual`);
   }
 
   function hasPreviousRxText(el) {
@@ -2742,7 +3082,8 @@
         font-size: 12px;
       }
       #${PANEL_ID} .vida-template-select,
-      #${PANEL_ID} .vida-rx-select {
+      #${PANEL_ID} .vida-rx-select,
+      #${PANEL_ID} .vida-dx-select {
         width: 100%;
         min-height: 32px;
         border: 1px solid #ccc;
@@ -2800,7 +3141,8 @@
         #${PANEL_ID} { max-width: 92vw; }
         #${PANEL_ID} .vida-body button { min-height: 44px; font-size: 14px; }
         #${PANEL_ID} .vida-template-select,
-        #${PANEL_ID} .vida-rx-select { min-height: 44px; font-size: 14px; }
+        #${PANEL_ID} .vida-rx-select,
+        #${PANEL_ID} .vida-dx-select { min-height: 44px; font-size: 14px; }
       }
       #${PANEL_ID} .vida-status {
         min-height: 18px;
@@ -2827,6 +3169,14 @@
         <button type="button" data-action="next-safe">Next Safe Step</button>
         <button type="button" data-action="focus-current">Focus Current Field</button>
         <button type="button" data-action="check-rx">Check Rx Fields</button>
+        <select class="vida-dx-select" aria-label="Saved assessment draft"></select>
+        <div class="vida-quick">
+          <button type="button" data-action="save-dx">Save Dx</button>
+          <button type="button" data-action="apply-dx">Apply Dx</button>
+          <button type="button" data-action="focus-dx">Find ICD</button>
+          <button type="button" data-action="copy-dx">Copy Dx</button>
+          <button type="button" data-action="delete-dx">Delete Dx</button>
+        </div>
         <select class="vida-rx-select" aria-label="Saved medication draft"></select>
         <div class="vida-quick">
           <button type="button" data-action="save-rx">Save Rx</button>
@@ -2884,6 +3234,11 @@
     panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
     panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
     panel.querySelector('[data-action="check-rx"]').addEventListener("click", checkPrescriptionFields);
+    panel.querySelector('[data-action="save-dx"]').addEventListener("click", saveCurrentDxPreset);
+    panel.querySelector('[data-action="apply-dx"]').addEventListener("click", applySelectedDxPreset);
+    panel.querySelector('[data-action="focus-dx"]').addEventListener("click", focusIcdSearch);
+    panel.querySelector('[data-action="copy-dx"]').addEventListener("click", copySelectedDxPreset);
+    panel.querySelector('[data-action="delete-dx"]').addEventListener("click", deleteSelectedDxPreset);
     panel.querySelector('[data-action="save-rx"]').addEventListener("click", saveCurrentRxPreset);
     panel.querySelector('[data-action="apply-rx"]').addEventListener("click", applySelectedRxPreset);
     panel.querySelector('[data-action="copy-rx"]').addEventListener("click", copySelectedRxPreset);
@@ -2927,6 +3282,7 @@
     panel.querySelector('[data-action="dashboard"]').addEventListener("click", goDashboard);
     refreshQuickTextSelect(panel);
     refreshRxPresetSelect(panel);
+    refreshDxPresetSelect(panel);
   }
 
   function updateCounts() {
