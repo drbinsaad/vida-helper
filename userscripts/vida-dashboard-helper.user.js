@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.12.0
+// @version      1.12.1
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.12.0";
+  const VERSION = "1.12.1";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -1427,7 +1427,7 @@
 
   function getDxSearchQuery(item) {
     if (!item) return "";
-    return cleanDxFieldValue(item.fields.icdCode10ID || item.fields.ascii_Desc || item.name);
+    return cleanDxFieldValue(item.fields.ascii_Desc || item.fields.icdCode10ID || item.name);
   }
 
   function saveCurrentDxPreset() {
@@ -1486,12 +1486,21 @@
   }
 
   function getIcdSearchField() {
-    const field = getAssessmentFieldElement("icdCode10ID");
-    const input = getNestedVisibleInput(field);
-    if (input) return input;
+    const visibleDescriptionInput = getFieldsByName("ascii_Desc")
+      .map((field) => getNestedVisibleInput(field))
+      .find((field) => field && /select\s*icd\s*code/i.test(field.getAttribute("placeholder") || ""));
+    if (visibleDescriptionInput) return visibleDescriptionInput;
+
+    const descriptionField = getAssessmentFieldElement("ascii_Desc");
+    const descriptionInput = getNestedVisibleInput(descriptionField);
+    if (descriptionInput) return descriptionInput;
+
+    const codeField = getAssessmentFieldElement("icdCode10ID");
+    const codeInput = getNestedVisibleInput(codeField);
     return getPlaceholderControls("Select ICD Code")[0] ||
       getPlaceholderControls("ICD")[0] ||
-      field;
+      codeInput ||
+      codeField;
   }
 
   function setAssessmentRemarks(value, replaceExisting) {
