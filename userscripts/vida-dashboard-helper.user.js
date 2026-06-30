@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.6.2
+// @version      1.7.0
 // @description  Workflow helper for VIDA dashboard and OPD details. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -12,11 +12,12 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.6.2";
+  const VERSION = "1.7.0";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
   const NETWORK_INSTALLED_KEY = "__vidaHelperNetworkRecorderInstalled";
+  const KEYBOARD_INSTALLED_KEY = "__vidaHelperKeyboardInstalled";
   const PRESCRIPTION_FIELD_NAMES = [
     "item",
     "dose",
@@ -91,6 +92,18 @@
     "dateFrom",
     "dateTo",
     "clinic",
+  ];
+  const SAFE_NAV_LABELS = [
+    "Review",
+    "Health Summary",
+    "Assessment",
+    "Vitals",
+    "Chief Complaint",
+    "History",
+    "Orders",
+    "Prescriptions",
+    "Sick Leave",
+    "Extend Sick Leave",
   ];
 
   function redact(value) {
@@ -695,6 +708,107 @@
     setStatus("Page size set to 100");
   }
 
+  function focusElement(el, label) {
+    if (!el) {
+      setStatus(`${label} not found`);
+      return false;
+    }
+    el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+    el.style.outline = "4px solid #2563eb";
+    el.style.outlineOffset = "3px";
+    el.title = `VIDA helper focus: ${label}`;
+    setStatus(`Focused ${label}`);
+    return true;
+  }
+
+  function getFirstFieldByNames(names) {
+    for (const name of names) {
+      const field = getFieldsByName(name)[0];
+      if (field) return field;
+    }
+    return null;
+  }
+
+  function focusPatientSearch() {
+    return focusElement(getFieldsByName("patientMRN")[0] || getPlaceholderControls("Patient MRN")[0], "patient MRN search");
+  }
+
+  function focusCurrentModuleField() {
+    const activeModule = getActiveModuleName();
+    if (activeModule === "Patient List") return focusPatientSearch();
+    if (activeModule === "Vitals") return focusElement(getFirstFieldByNames(["weightKg", "temperatureCelcius", "pulseBeatPerMinute", "bloodPressureHigher", "painScore"]), "vitals field");
+    if (activeModule === "History / HOPI" || activeModule === "Current Medication") return focusElement(getFirstFieldByNames(["hopi", "drug", "dose", "currentMedication"]), "history field");
+    if (activeModule === "Assessment / Diagnosis") return focusElement(getFirstFieldByNames(["icdCode10ID", "conditionID", "diagnosisTypeID", "remarks"]), "assessment field");
+    if (activeModule === "Orders / Prescriptions") return focusElement(getFirstFieldByNames(["item", "dose", "strength", "route", "frequency", "duration"]), "prescription field");
+    if (activeModule === "Sick Leave") return focusElement(getFirstFieldByNames(["noOfDays", "startDate", "remarks"]), "sick leave field");
+
+    const firstControl = Array.from(document.querySelectorAll("input,select,textarea,[formcontrolname]")).filter(visible)[0];
+    return focusElement(firstControl, "first visible field");
+  }
+
+  function clickSafeNav(label) {
+    if (!SAFE_NAV_LABELS.includes(label)) {
+      setStatus(`Not a safe navigation target: ${label}`);
+      return false;
+    }
+    const control = findExactElementsByText(label)[0] || findFirstButtonByText(label);
+    if (!control) {
+      setStatus(`${label} tab not found`);
+      return false;
+    }
+    control.click();
+    setStatus(`Opened ${label}`);
+    return true;
+  }
+
+  function nextSafeStep() {
+    const activeModule = getActiveModuleName();
+    if (activeModule === "Patient List") {
+      setPageSize100();
+      markPatientListFields();
+      focusPatientSearch();
+      return;
+    }
+    if (activeModule === "Patient Access Prompt") {
+      markPatientListFields();
+      setStatus("Prompt marked; Continue remains manual");
+      return;
+    }
+    if (activeModule === "Encounter Review / Loading" || activeModule === "OPD Details") {
+      markEncounterControls();
+      setStatus("Review controls marked; choose the module manually");
+      return;
+    }
+    if (activeModule === "Vitals") {
+      markVitalsFields();
+      focusCurrentModuleField();
+      return;
+    }
+    if (activeModule === "History / HOPI" || activeModule === "Current Medication") {
+      markHistoryFields();
+      focusCurrentModuleField();
+      return;
+    }
+    if (activeModule === "Assessment / Diagnosis") {
+      markAssessmentFields();
+      focusCurrentModuleField();
+      return;
+    }
+    if (activeModule === "Orders / Prescriptions") {
+      markOrdersFields();
+      focusCurrentModuleField();
+      return;
+    }
+    if (activeModule === "Sick Leave") {
+      markSickLeaveFields();
+      focusCurrentModuleField();
+      return;
+    }
+    markActiveFormFields();
+    focusCurrentModuleField();
+  }
+
   function markActionButtons() {
     const actions = [
       ["New Episode", "#047857"],
@@ -1043,6 +1157,34 @@
     }
   }
 
+  function isTypingTarget(target) {
+    if (!target) return false;
+    const tag = String(target.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+  }
+
+  function installKeyboardShortcuts() {
+    if (window[KEYBOARD_INSTALLED_KEY]) return;
+    window[KEYBOARD_INSTALLED_KEY] = true;
+    document.addEventListener("keydown", (event) => {
+      if (!event.altKey || !event.shiftKey || isTypingTarget(event.target)) return;
+      const key = String(event.key || "").toLowerCase();
+      if (key === "n") {
+        event.preventDefault();
+        nextSafeStep();
+      } else if (key === "f") {
+        event.preventDefault();
+        focusCurrentModuleField();
+      } else if (key === "c") {
+        event.preventDefault();
+        copySnapshot();
+      } else if (key === "d") {
+        event.preventDefault();
+        goDashboard();
+      }
+    });
+  }
+
   function buildPanel() {
     if (document.getElementById(PANEL_ID)) return;
 
@@ -1077,6 +1219,11 @@
         display: grid;
         gap: 8px;
       }
+      #${PANEL_ID} .vida-quick {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
       #${PANEL_ID} button {
         min-height: 34px;
         border: 1px solid #ccc;
@@ -1085,6 +1232,10 @@
         color: #222;
         font-weight: 700;
         cursor: pointer;
+      }
+      #${PANEL_ID} .vida-quick button {
+        min-height: 30px;
+        font-size: 12px;
       }
       #${PANEL_ID} .vida-status {
         min-height: 18px;
@@ -1106,6 +1257,16 @@
       </div>
       <div class="vida-body">
         <div class="vida-counts">Reading dashboard...</div>
+        <button type="button" data-action="next-safe">Next Safe Step</button>
+        <button type="button" data-action="focus-current">Focus Current Field</button>
+        <div class="vida-quick">
+          <button type="button" data-nav="Vitals">Vitals</button>
+          <button type="button" data-nav="Chief Complaint">Chief</button>
+          <button type="button" data-nav="Assessment">Dx</button>
+          <button type="button" data-nav="Orders">Orders</button>
+          <button type="button" data-nav="Prescriptions">Rx</button>
+          <button type="button" data-nav="Sick Leave">Sick</button>
+        </div>
         <button type="button" data-action="copy">Copy Page Snapshot</button>
         <button type="button" data-action="mark-dashboard">Mark Episode Buttons</button>
         <button type="button" data-action="mark-patient-list">Mark Patient List</button>
@@ -1127,6 +1288,11 @@
     document.documentElement.appendChild(style);
     document.body.appendChild(panel);
 
+    panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
+    panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
+    for (const button of panel.querySelectorAll("[data-nav]")) {
+      button.addEventListener("click", () => clickSafeNav(button.getAttribute("data-nav")));
+    }
     panel.querySelector('[data-action="copy"]').addEventListener("click", copySnapshot);
     panel.querySelector('[data-action="mark-dashboard"]').addEventListener("click", markActionButtons);
     panel.querySelector('[data-action="mark-patient-list"]').addEventListener("click", markPatientListFields);
@@ -1160,6 +1326,7 @@
   function install() {
     if (!document.body) return;
     installNetworkRecorder();
+    installKeyboardShortcuts();
     buildPanel();
     updateCounts();
   }
