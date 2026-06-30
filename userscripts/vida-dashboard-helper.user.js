@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.10.2
+// @version      1.11.0
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.10.2";
+  const VERSION = "1.11.0";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -24,6 +24,7 @@
   const PANEL_COLLAPSED_KEY = "__vidaHelperPanelCollapsed";
   const QUICK_TEXT_KEY = "__vidaHelperQuickTexts";
   const MODULE_DEFAULT_KEY = "__vidaHelperModuleDefaults";
+  const RX_PRESET_KEY = "__vidaHelperRxPresets";
   const EXPANSION_INSTALLED_KEY = "__vidaHelperExpansionInstalled";
   const QUICK_TEXT_TRIGGER_SIGIL = "/";
   const MAX_TRIGGER_LENGTH = 24;
@@ -75,6 +76,43 @@
     "duration",
     "prescriptionInstruction",
   ];
+  const RX_PRESET_FIELD_NAMES = [
+    "item",
+    "dose",
+    "strength",
+    "route",
+    "frequency",
+    "doseTime",
+    "indications",
+    "duration",
+    "prescriptionInstruction",
+  ];
+  const RX_APPLY_TEXT_FIELD_NAMES = [
+    "dose",
+    "prescriptionInstruction",
+  ];
+  const RX_REVIEW_FIELD_NAMES = [
+    "item",
+    "strength",
+    "route",
+    "frequency",
+    "doseTime",
+    "indications",
+    "duration",
+    "startDateTime",
+  ];
+  const RX_FIELD_LABELS = {
+    item: "medication",
+    dose: "dose",
+    strength: "strength",
+    route: "route",
+    frequency: "frequency",
+    doseTime: "dose timing",
+    indications: "indications",
+    startDateTime: "start date/time",
+    duration: "duration",
+    prescriptionInstruction: "instruction",
+  };
   const SICK_LEAVE_FIELD_NAMES = [
     "noOfDays",
     "startDate",
@@ -821,6 +859,348 @@
       return;
     }
     localStorage.setItem(QUICK_TEXT_KEY, value);
+  }
+
+  function getRxPresetStorageRaw() {
+    if (typeof GM_getValue === "function") return GM_getValue(RX_PRESET_KEY, "[]");
+    return localStorage.getItem(RX_PRESET_KEY) || "[]";
+  }
+
+  function setRxPresetStorageRaw(value) {
+    if (typeof GM_setValue === "function") {
+      GM_setValue(RX_PRESET_KEY, value);
+      return;
+    }
+    localStorage.setItem(RX_PRESET_KEY, value);
+  }
+
+  function cleanRxFieldValue(value) {
+    return norm(value)
+      .replace(/×/g, " ")
+      .replace(/(^|\s)x(?=\s|$)/gi, " ")
+      .replace(/\bSelect\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getRxPresets() {
+    let parsed = [];
+    try {
+      parsed = JSON.parse(getRxPresetStorageRaw());
+    } catch (_error) {
+      parsed = [];
+    }
+
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        const fields = {};
+        const sourceFields = item && item.fields && typeof item.fields === "object" ? item.fields : {};
+        for (const name of RX_PRESET_FIELD_NAMES) {
+          fields[name] = cleanRxFieldValue(sourceFields[name] || "").slice(0, 1000);
+        }
+        return {
+          id: String(item && item.id || ""),
+          name: norm(item && item.name || "").slice(0, 60),
+          fields,
+          updatedAt: String(item && item.updatedAt || ""),
+        };
+      })
+      .filter((item) => item.id && item.name && Object.values(item.fields).some(Boolean));
+  }
+
+  function setRxPresets(items) {
+    setRxPresetStorageRaw(JSON.stringify(items.slice(0, 40)));
+    refreshRxPresetSelect();
+  }
+
+  function rxLabel(name) {
+    return RX_FIELD_LABELS[name] || name;
+  }
+
+  function isPatientIdentifierRisk(text) {
+    return /\b05\d{8}\b|\b\d{6,}\b|\bmrn\b|\bfile\s*number\b/i.test(String(text || ""));
+  }
+
+  function getRxFieldElement(name) {
+    const fields = getFieldsByName(name).filter(isForegroundElement);
+    if (fields.length) return fields[0];
+    return getFieldsByName(name)[0] || null;
+  }
+
+  function getNestedVisibleInput(el) {
+    if (!el) return null;
+    const tag = String(el.tagName || "").toLowerCase();
+    if ((tag === "input" || tag === "textarea") && !el.disabled && !el.readOnly) return el;
+    return Array.from(el.querySelectorAll("input,textarea"))
+      .filter(visible)
+      .find((field) => !field.disabled && !field.readOnly) || null;
+  }
+
+  function getRxFieldValue(name) {
+    const field = getRxFieldElement(name);
+    if (!field) return "";
+    const tag = String(field.tagName || "").toLowerCase();
+    if (tag === "select") {
+      return cleanRxFieldValue(Array.from(field.selectedOptions || []).map((option) => option.textContent).join(" "));
+    }
+    if (tag === "input" || tag === "textarea") return cleanRxFieldValue(field.value || "");
+
+    const directInput = getNestedVisibleInput(field);
+    if (directInput && directInput.value) return cleanRxFieldValue(directInput.value);
+    const valueLabel = field.querySelector(".ng-value-label,.ng-select-container,.mat-select-value,.select2-selection__rendered");
+    return cleanRxFieldValue((valueLabel && (valueLabel.innerText || valueLabel.textContent)) || field.innerText || field.textContent || "");
+  }
+
+  function captureCurrentRxDraftFields() {
+    const fields = {};
+    for (const name of RX_PRESET_FIELD_NAMES) {
+      fields[name] = getRxFieldValue(name);
+    }
+    return fields;
+  }
+
+  function isPrescriptionContextVisible() {
+    return getActiveModuleName() === "Orders / Prescriptions" ||
+      RX_PRESET_FIELD_NAMES.some((name) => getRxFieldElement(name)) ||
+      getPlaceholderControls("Search for Prescriptions").length > 0;
+  }
+
+  function refreshRxPresetSelect(panel) {
+    const root = panel || document.getElementById(PANEL_ID);
+    if (!root) return;
+    const select = root.querySelector(".vida-rx-select");
+    if (!select) return;
+
+    const selected = select.value;
+    select.innerHTML = "";
+    const items = getRxPresets();
+    if (!items.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No saved Rx";
+      select.appendChild(option);
+      select.disabled = true;
+      return;
+    }
+
+    select.disabled = false;
+    for (const item of items) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.name;
+      select.appendChild(option);
+    }
+    if (items.some((item) => item.id === selected)) select.value = selected;
+  }
+
+  function getSelectedRxPreset() {
+    const select = document.querySelector(`#${PANEL_ID} .vida-rx-select`);
+    const id = select && select.value;
+    return getRxPresets().find((item) => item.id === id) || null;
+  }
+
+  function saveCurrentRxPreset() {
+    if (!isPrescriptionContextVisible()) {
+      setStatus("Open the prescription drawer first");
+      return;
+    }
+
+    const fields = captureCurrentRxDraftFields();
+    if (!Object.values(fields).some(Boolean)) {
+      setStatus("No Rx fields found to save");
+      return;
+    }
+
+    if (Object.values(fields).some(isPatientIdentifierRisk)) {
+      const ok = window.confirm("This Rx draft may contain patient identifiers. Save as a reusable medication draft anyway?");
+      if (!ok) {
+        setStatus("Rx draft not saved");
+        return;
+      }
+    }
+
+    const defaultName = fields.item || fields.prescriptionInstruction || "Rx draft";
+    const name = norm(window.prompt("Medication draft name. Do not include patient identifiers.", defaultName) || "").slice(0, 60);
+    if (!name) {
+      setStatus("Rx draft name cancelled");
+      return;
+    }
+
+    const existingItems = getRxPresets();
+    const existing = existingItems.find((item) => item.name.toLowerCase() === name.toLowerCase());
+    const savedItem = {
+      id: existing ? existing.id : String(Date.now()),
+      name,
+      fields,
+      updatedAt: new Date().toISOString(),
+    };
+    setRxPresets([savedItem].concat(existingItems.filter((item) => item.name.toLowerCase() !== name.toLowerCase())));
+
+    const select = document.querySelector(`#${PANEL_ID} .vida-rx-select`);
+    if (select) select.value = savedItem.id;
+    setStatus(`Saved Rx draft "${name}"`);
+  }
+
+  function deleteSelectedRxPreset() {
+    const item = getSelectedRxPreset();
+    if (!item) {
+      setStatus("No Rx draft selected");
+      return;
+    }
+
+    const ok = window.confirm(`Delete Rx draft "${item.name}"?`);
+    if (!ok) return;
+    setRxPresets(getRxPresets().filter((current) => current.id !== item.id));
+    setStatus(`Deleted Rx draft "${item.name}"`);
+  }
+
+  function getWritableRxTextField(name) {
+    const field = getRxFieldElement(name);
+    if (!field) return null;
+    const input = getNestedVisibleInput(field);
+    if (!input) return null;
+    const tag = String(input.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" ? input : null;
+  }
+
+  function setRxTextFieldValue(name, value, replaceExisting) {
+    const field = getWritableRxTextField(name);
+    if (!field || !value) return "missing";
+    const current = cleanRxFieldValue(field.value || "");
+    if (current && current !== cleanRxFieldValue(value) && !replaceExisting) return "skipped";
+    setNativeValue(field, value);
+    dispatchTextEvents(field, value);
+    flashFieldOutline(field);
+    return "filled";
+  }
+
+  function markRxReviewField(name) {
+    const field = getRxFieldElement(name);
+    if (!field) return false;
+    field.style.outline = "3px solid #ea580c";
+    field.style.outlineOffset = "2px";
+    field.title = `VIDA helper: review ${name} manually`;
+    return true;
+  }
+
+  function markRxRecordActions() {
+    let count = 0;
+    for (const label of ["Add", "Continue", "Save", "SAVE"]) {
+      for (const control of uniqueElements([...findButtonsByText(label), ...findExactElementsByText(label)])) {
+        control.style.outline = "4px solid #dc2626";
+        control.style.outlineOffset = "2px";
+        control.title = `VIDA helper: ${label} changes the patient record; click manually after review`;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  function formatRxPreset(item) {
+    if (!item) return "";
+    const lines = [`Rx draft: ${item.name}`];
+    for (const name of RX_PRESET_FIELD_NAMES) {
+      const value = item.fields[name];
+      if (value) lines.push(`${rxLabel(name)}: ${value}`);
+    }
+    lines.push("Review in VIDA before Add/Continue/Save.");
+    return lines.join("\n");
+  }
+
+  function copySelectedRxPreset() {
+    const item = getSelectedRxPreset();
+    if (!item) {
+      setStatus("Save an Rx draft first");
+      return;
+    }
+    copy(formatRxPreset(item))
+      .then(() => setStatus(`Copied Rx draft "${item.name}"`))
+      .catch((error) => setStatus(`Copy failed: ${error && error.message || error}`));
+  }
+
+  function getMedicationSearchField() {
+    const itemField = getRxFieldElement("item");
+    const itemInput = getNestedVisibleInput(itemField);
+    if (itemInput) return itemInput;
+    return getPlaceholderControls("Search for Prescriptions")[0] ||
+      getPlaceholderControls("Search Favorite")[0] ||
+      getPlaceholderControls("Search")[0] ||
+      itemField;
+  }
+
+  function focusMedicationSearch() {
+    const target = getMedicationSearchField();
+    if (!target) {
+      setStatus("Medication search field not found");
+      return false;
+    }
+
+    const item = getSelectedRxPreset();
+    const query = item && (item.fields.item || item.name);
+    focusElement(target, "medication search");
+    if (!query) return true;
+    copy(query)
+      .then(() => setStatus(`Medication name copied; paste/search and select manually`))
+      .catch(() => setStatus("Focused medication search"));
+    return true;
+  }
+
+  function applySelectedRxPreset() {
+    const item = getSelectedRxPreset();
+    if (!item) {
+      setStatus("Save an Rx draft first");
+      return;
+    }
+    if (!isPrescriptionContextVisible()) {
+      setStatus("Open the prescription drawer first");
+      return;
+    }
+
+    const conflicts = RX_APPLY_TEXT_FIELD_NAMES
+      .filter((name) => item.fields[name])
+      .filter((name) => {
+        const field = getWritableRxTextField(name);
+        return field && cleanRxFieldValue(field.value || "") && cleanRxFieldValue(field.value || "") !== cleanRxFieldValue(item.fields[name]);
+      })
+      .map(rxLabel);
+    let replaceExisting = true;
+    if (conflicts.length) {
+      replaceExisting = window.confirm(`Replace current Rx text in ${conflicts.join(", ")}?`);
+      if (!replaceExisting) {
+        setStatus("Rx draft kept current field text");
+      }
+    }
+
+    const filled = [];
+    const skipped = [];
+    const missing = [];
+    for (const name of RX_APPLY_TEXT_FIELD_NAMES) {
+      const value = item.fields[name];
+      if (!value) continue;
+      const result = setRxTextFieldValue(name, value, replaceExisting);
+      if (result === "filled") filled.push(rxLabel(name));
+      else if (result === "skipped") skipped.push(rxLabel(name));
+      else missing.push(rxLabel(name));
+    }
+
+    const review = [];
+    for (const name of RX_REVIEW_FIELD_NAMES) {
+      if (markRxReviewField(name)) review.push(rxLabel(name));
+    }
+    markRxRecordActions();
+
+    const medicationQuery = item.fields.item || item.name;
+    if (medicationQuery) {
+      copy(medicationQuery).catch(() => {});
+    }
+
+    const filledText = filled.length ? `Drafted ${filled.join(", ")}` : "No writable Rx text fields drafted";
+    const skippedText = skipped.length ? `; kept existing ${skipped.join(", ")}` : "";
+    const missingText = missing.length ? `; not found ${missing.join(", ")}` : "";
+    const reviewText = review.length ? `; review ${review.join(", ")}` : "";
+    const copiedText = medicationQuery ? "; med name copied" : "";
+    setStatus(`${filledText}${skippedText}${missingText}${reviewText}${copiedText}; Add/Save manual`);
   }
 
   function getFieldName(el) {
@@ -2168,7 +2548,8 @@
         min-height: 30px;
         font-size: 12px;
       }
-      #${PANEL_ID} .vida-template-select {
+      #${PANEL_ID} .vida-template-select,
+      #${PANEL_ID} .vida-rx-select {
         width: 100%;
         min-height: 32px;
         border: 1px solid #ccc;
@@ -2225,7 +2606,8 @@
       @media (pointer: coarse) {
         #${PANEL_ID} { max-width: 92vw; }
         #${PANEL_ID} .vida-body button { min-height: 44px; font-size: 14px; }
-        #${PANEL_ID} .vida-template-select { min-height: 44px; font-size: 14px; }
+        #${PANEL_ID} .vida-template-select,
+        #${PANEL_ID} .vida-rx-select { min-height: 44px; font-size: 14px; }
       }
       #${PANEL_ID} .vida-status {
         min-height: 18px;
@@ -2252,6 +2634,14 @@
         <button type="button" data-action="next-safe">Next Safe Step</button>
         <button type="button" data-action="focus-current">Focus Current Field</button>
         <button type="button" data-action="check-rx">Check Rx Fields</button>
+        <select class="vida-rx-select" aria-label="Saved medication draft"></select>
+        <div class="vida-quick">
+          <button type="button" data-action="save-rx">Save Rx</button>
+          <button type="button" data-action="apply-rx">Apply Rx</button>
+          <button type="button" data-action="copy-rx">Copy Rx</button>
+          <button type="button" data-action="focus-rx">Find Med</button>
+          <button type="button" data-action="delete-rx">Delete Rx</button>
+        </div>
         <select class="vida-template-select" aria-label="Saved quick text"></select>
         <div class="vida-quick">
           <button type="button" data-action="insert-text">Insert Text</button>
@@ -2299,6 +2689,11 @@
     panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
     panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
     panel.querySelector('[data-action="check-rx"]').addEventListener("click", checkPrescriptionFields);
+    panel.querySelector('[data-action="save-rx"]').addEventListener("click", saveCurrentRxPreset);
+    panel.querySelector('[data-action="apply-rx"]').addEventListener("click", applySelectedRxPreset);
+    panel.querySelector('[data-action="copy-rx"]').addEventListener("click", copySelectedRxPreset);
+    panel.querySelector('[data-action="focus-rx"]').addEventListener("click", focusMedicationSearch);
+    panel.querySelector('[data-action="delete-rx"]').addEventListener("click", deleteSelectedRxPreset);
     const insertButton = panel.querySelector('[data-action="insert-text"]');
     insertButton.addEventListener("pointerdown", (event) => event.preventDefault());
     insertButton.addEventListener("click", insertQuickText);
@@ -2334,6 +2729,7 @@
     panel.querySelector('[data-action="refresh"]').addEventListener("click", clickRefresh);
     panel.querySelector('[data-action="dashboard"]').addEventListener("click", goDashboard);
     refreshQuickTextSelect(panel);
+    refreshRxPresetSelect(panel);
   }
 
   function updateCounts() {

@@ -7,9 +7,10 @@ Safe starter kit for building a VIDA browser helper that can run on:
 - Safari/Chrome on Mac, through a userscript manager.
 
 The current dashboard script is a safe workflow helper. It highlights VIDA
-fields/buttons, captures sanitized snapshots, and can insert your own saved
-quick-text templates into free-text fields. It does not click Add, Continue, or
-Save for patient-record actions.
+fields/buttons, captures sanitized snapshots, inserts your own saved quick-text
+templates into free-text fields, and can save/apply local medication draft
+presets for prescription drawers. It does not click Add, Continue, or Save for
+patient-record actions.
 
 ## What I learned from the public app
 
@@ -40,7 +41,10 @@ Save for patient-record actions.
 After installing the userscript, log in to VIDA, go to the exact page you want to
 speed up, and use the floating `VIDA Helper` panel. For autofill, click a
 free-text field, type a reusable phrase once, press `Save Field`, then use
-`Insert Text` later to draft it into the active field for manual review.
+`Insert Text` later to draft it into the active field for manual review. For
+common medications, open a prescription drawer after choosing the medication and
+details, press `Save Rx`, then later use `Find Med`, `Apply Rx`, and `Copy Rx`
+to speed up drafting while keeping Add/Save manual.
 
 Paste that snapshot back here after checking it has no patient name, MRN, phone,
 or ID number. Then I can build the exact action script for your workflow.
