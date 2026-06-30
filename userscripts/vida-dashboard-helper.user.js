@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.7.0
+// @version      1.8.0
 // @description  Workflow helper for VIDA dashboard and OPD details. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -12,12 +12,14 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.7.0";
+  const VERSION = "1.8.0";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
   const NETWORK_INSTALLED_KEY = "__vidaHelperNetworkRecorderInstalled";
   const KEYBOARD_INSTALLED_KEY = "__vidaHelperKeyboardInstalled";
+  const PANEL_POSITION_KEY = "__vidaHelperPanelPosition";
+  const PANEL_COLLAPSED_KEY = "__vidaHelperPanelCollapsed";
   const PRESCRIPTION_FIELD_NAMES = [
     "item",
     "dose",
@@ -164,6 +166,14 @@
 
   function getFieldsByName(name) {
     return Array.from(document.querySelectorAll(`[formcontrolname="${name}"]`)).filter(visible);
+  }
+
+  function fieldHasContent(field) {
+    if (!field) return false;
+    const directValue = norm(field.value || field.getAttribute("value") || "");
+    if (directValue && !/^select$/i.test(directValue)) return true;
+    const text = norm(field.innerText || field.textContent || "");
+    return Boolean(text && !/^select$/i.test(text));
   }
 
   function hasVisibleClinicalFields() {
@@ -809,6 +819,58 @@
     focusCurrentModuleField();
   }
 
+  function checkPrescriptionFields() {
+    const requiredFields = [
+      "item",
+      "dose",
+      "strength",
+      "route",
+      "frequency",
+      "doseTime",
+      "indications",
+      "startDateTime",
+      "duration",
+    ];
+    const missing = [];
+    let count = 0;
+
+    for (const name of requiredFields) {
+      const fields = getFieldsByName(name);
+      const filled = fields.some(fieldHasContent);
+      if (!fields.length || !filled) missing.push(name);
+      for (const field of fields) {
+        field.style.outline = filled ? "3px solid #0f766e" : "4px solid #dc2626";
+        field.style.outlineOffset = "2px";
+        field.title = filled ? `VIDA helper checked: ${name}` : `VIDA helper check needed: ${name}`;
+        count += 1;
+      }
+    }
+
+    for (const name of ["prescriptionInstruction"]) {
+      for (const field of getFieldsByName(name)) {
+        field.style.outline = fieldHasContent(field) ? "3px solid #0f766e" : "3px solid #64748b";
+        field.style.outlineOffset = "2px";
+        field.title = `VIDA helper optional field: ${name}`;
+        count += 1;
+      }
+    }
+
+    for (const label of ["Add", "Continue", "Save", "SAVE"]) {
+      for (const control of uniqueElements([...findButtonsByText(label), ...findExactElementsByText(label)])) {
+        control.style.outline = "4px solid #dc2626";
+        control.style.outlineOffset = "2px";
+        control.title = `VIDA helper: ${label} changes the patient record; click manually after review`;
+        count += 1;
+      }
+    }
+
+    if (missing.length) {
+      setStatus(`Check Rx: ${missing.join(", ")}`);
+    } else {
+      setStatus(`Rx fields look filled; review then save manually (${count} marked)`);
+    }
+  }
+
   function markActionButtons() {
     const actions = [
       ["New Episode", "#047857"],
@@ -1178,10 +1240,102 @@
       } else if (key === "c") {
         event.preventDefault();
         copySnapshot();
+      } else if (key === "r") {
+        event.preventDefault();
+        checkPrescriptionFields();
       } else if (key === "d") {
         event.preventDefault();
         goDashboard();
       }
+    });
+  }
+
+  function savePanelPosition(panel) {
+    const rect = panel.getBoundingClientRect();
+    localStorage.setItem(PANEL_POSITION_KEY, JSON.stringify({
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+    }));
+  }
+
+  function applyPanelPosition(panel) {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(PANEL_POSITION_KEY) || "null");
+    } catch (_error) {
+      saved = null;
+    }
+
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      panel.style.left = `${Math.max(8, Math.min(saved.left, window.innerWidth - 80))}px`;
+      panel.style.top = `${Math.max(8, Math.min(saved.top, window.innerHeight - 48))}px`;
+      return;
+    }
+
+    panel.style.left = "18px";
+    panel.style.top = "80px";
+  }
+
+  function dockPanelLeft(panel) {
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.left = "18px";
+    panel.style.top = `${Math.max(18, window.innerHeight - panel.offsetHeight - 18)}px`;
+    savePanelPosition(panel);
+    setStatus("Panel docked left");
+  }
+
+  function togglePanelCollapsed(panel) {
+    const collapsed = !panel.classList.contains("vida-mini");
+    panel.classList.toggle("vida-mini", collapsed);
+    localStorage.setItem(PANEL_COLLAPSED_KEY, collapsed ? "1" : "0");
+    const button = panel.querySelector('[data-action="toggle-panel"]');
+    if (button) button.textContent = collapsed ? "Show" : "Hide";
+    savePanelPosition(panel);
+  }
+
+  function applyPanelCollapsed(panel) {
+    const collapsed = localStorage.getItem(PANEL_COLLAPSED_KEY) === "1";
+    panel.classList.toggle("vida-mini", collapsed);
+    const button = panel.querySelector('[data-action="toggle-panel"]');
+    if (button) button.textContent = collapsed ? "Show" : "Hide";
+  }
+
+  function makePanelDraggable(panel) {
+    const handle = panel.querySelector(".vida-title");
+    if (!handle) return;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    let dragging = false;
+
+    handle.addEventListener("mousedown", (event) => {
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      event.preventDefault();
+    });
+
+    document.addEventListener("mousemove", (event) => {
+      if (!dragging) return;
+      const nextLeft = Math.max(8, Math.min(startLeft + event.clientX - startX, window.innerWidth - panel.offsetWidth - 8));
+      const nextTop = Math.max(8, Math.min(startTop + event.clientY - startY, window.innerHeight - 48));
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      panel.style.left = `${nextLeft}px`;
+      panel.style.top = `${nextTop}px`;
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      dragging = false;
+      savePanelPosition(panel);
     });
   }
 
@@ -1192,10 +1346,10 @@
     style.textContent = `
       #${PANEL_ID} {
         position: fixed;
-        right: 18px;
-        bottom: 18px;
+        left: 18px;
+        bottom: auto;
         z-index: 2147483647;
-        width: 280px;
+        width: 260px;
         background: #fff;
         border: 1px solid #ddd;
         border-radius: 8px;
@@ -1209,15 +1363,29 @@
         justify-content: space-between;
         align-items: center;
         gap: 8px;
-        padding: 10px 12px;
+        padding: 8px 10px;
         background: ${RED};
         color: #fff;
         font-weight: 700;
+      }
+      #${PANEL_ID} .vida-title {
+        flex: 1;
+        cursor: move;
+        user-select: none;
+      }
+      #${PANEL_ID} .vida-version {
+        font-size: 11px;
+        white-space: nowrap;
       }
       #${PANEL_ID} .vida-body {
         padding: 10px;
         display: grid;
         gap: 8px;
+        max-height: min(72vh, 640px);
+        overflow: auto;
+      }
+      #${PANEL_ID}.vida-mini .vida-body {
+        display: none;
       }
       #${PANEL_ID} .vida-quick {
         display: grid;
@@ -1232,6 +1400,15 @@
         color: #222;
         font-weight: 700;
         cursor: pointer;
+      }
+      #${PANEL_ID} .vida-head button {
+        min-height: 24px;
+        border-color: rgba(255,255,255,.5);
+        background: rgba(255,255,255,.15);
+        color: #fff;
+        border-radius: 5px;
+        padding: 2px 6px;
+        font-size: 11px;
       }
       #${PANEL_ID} .vida-quick button {
         min-height: 30px;
@@ -1252,13 +1429,16 @@
     panel.id = PANEL_ID;
     panel.innerHTML = `
       <div class="vida-head">
-        <span>VIDA Helper</span>
-        <span>v${VERSION}</span>
+        <span class="vida-title">VIDA Helper</span>
+        <span class="vida-version">v${VERSION}</span>
+        <button type="button" data-action="dock-left">Left</button>
+        <button type="button" data-action="toggle-panel">Hide</button>
       </div>
       <div class="vida-body">
         <div class="vida-counts">Reading dashboard...</div>
         <button type="button" data-action="next-safe">Next Safe Step</button>
         <button type="button" data-action="focus-current">Focus Current Field</button>
+        <button type="button" data-action="check-rx">Check Rx Fields</button>
         <div class="vida-quick">
           <button type="button" data-nav="Vitals">Vitals</button>
           <button type="button" data-nav="Chief Complaint">Chief</button>
@@ -1288,8 +1468,14 @@
     document.documentElement.appendChild(style);
     document.body.appendChild(panel);
 
+    applyPanelPosition(panel);
+    applyPanelCollapsed(panel);
+    makePanelDraggable(panel);
+    panel.querySelector('[data-action="dock-left"]').addEventListener("click", () => dockPanelLeft(panel));
+    panel.querySelector('[data-action="toggle-panel"]').addEventListener("click", () => togglePanelCollapsed(panel));
     panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
     panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
+    panel.querySelector('[data-action="check-rx"]').addEventListener("click", checkPrescriptionFields);
     for (const button of panel.querySelectorAll("[data-nav]")) {
       button.addEventListener("click", () => clickSafeNav(button.getAttribute("data-nav")));
     }
