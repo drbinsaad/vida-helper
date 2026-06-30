@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "VIDA Helper Inspector",
+  "version": "0.1.0",
+  "description": "Safe VIDA page inspector for building Mac browser helpers.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://vida.hmg.com/*",
+        "https://vida.hmg.com:8081/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "permissions": [
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://vida.hmg.com/*",
+    "https://vida.hmg.com:8081/*"
+  ]
+}
