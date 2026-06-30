@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.9.0
-// @description  Workflow helper for VIDA dashboard and OPD details. Safe: no automatic patient action clicks.
+// @version      1.10.1
+// @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
 // @run-at       document-idle
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.9.0";
+  const VERSION = "1.10.1";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -23,12 +23,30 @@
   const PANEL_POSITION_KEY = "__vidaHelperPanelPosition";
   const PANEL_COLLAPSED_KEY = "__vidaHelperPanelCollapsed";
   const QUICK_TEXT_KEY = "__vidaHelperQuickTexts";
+  const MODULE_DEFAULT_KEY = "__vidaHelperModuleDefaults";
+  const EXPANSION_INSTALLED_KEY = "__vidaHelperExpansionInstalled";
+  const QUICK_TEXT_TRIGGER_SIGIL = "/";
+  const MAX_TRIGGER_LENGTH = 24;
+  let quickTextTriggerIndex = new Map();
+  let lastSyncedModule = "";
+  let lastExpansion = null;
+  let expansionInProgress = false;
+  let lastQuickTextField = null;
+  const userChosenModules = new Set();
   const QUICK_TEXT_FIELD_NAMES = [
     "hopi",
     "currentMedication",
     "chiefComplaintRemarks",
     "remarks",
     "prescriptionInstruction",
+  ];
+  const QUICK_TEXT_MODULE_SCOPES = [
+    "History / HOPI",
+    "Current Medication",
+    "Chief Complaint",
+    "Orders / Prescriptions",
+    "Assessment / Diagnosis",
+    "Sick Leave",
   ];
   const PRESCRIPTION_FIELD_NAMES = [
     "item",
@@ -764,12 +782,15 @@
         id: String(item && item.id || ""),
         name: norm(item && item.name || "").slice(0, 60),
         text: String(item && item.text || "").slice(0, 4000),
+        trigger: normalizeTrigger(item && item.trigger),
+        scope: normalizeQuickTextScope(item && item.scope),
       }))
       .filter((item) => item.id && item.name && item.text);
   }
 
   function setQuickTexts(items) {
     setQuickTextStorageRaw(JSON.stringify(items.slice(0, 40)));
+    buildTriggerIndex();
     refreshQuickTextSelect();
   }
 
@@ -790,6 +811,51 @@
     return String(el && (el.getAttribute("formcontrolname") || el.getAttribute("name") || "") || "");
   }
 
+  function normalizeQuickTextScope(raw) {
+    const value = norm(raw);
+    return QUICK_TEXT_MODULE_SCOPES.includes(value) ? value : "";
+  }
+
+  function getPreferredQuickTextFieldsForModule(module) {
+    if (module === "History / HOPI") return ["hopi", "currentMedication", "chiefComplaintRemarks"];
+    if (module === "Current Medication") return ["currentMedication", "hopi"];
+    if (module === "Orders / Prescriptions") return ["prescriptionInstruction"];
+    if (module === "Assessment / Diagnosis") return ["remarks"];
+    if (module === "Sick Leave") return ["remarks"];
+    if (module === "Chief Complaint") return ["chiefComplaintRemarks", "hopi"];
+    return [];
+  }
+
+  function getQuickTextScopeForTarget(el) {
+    const activeModule = getActiveModuleName();
+    const name = getFieldName(el);
+    if (name === "hopi") return "History / HOPI";
+    if (name === "currentMedication") return "Current Medication";
+    if (name === "chiefComplaintRemarks") return "Chief Complaint";
+    if (name === "prescriptionInstruction") return "Orders / Prescriptions";
+    if (name === "remarks" && (activeModule === "Assessment / Diagnosis" || activeModule === "Sick Leave")) return activeModule;
+    return normalizeQuickTextScope(activeModule);
+  }
+
+  function describeQuickTextTarget(el) {
+    return getFieldName(el) || getQuickTextScopeForTarget(el) || "free-text field";
+  }
+
+  function isForegroundElement(el) {
+    if (!el || typeof document.elementsFromPoint !== "function") return true;
+    const rect = el.getBoundingClientRect();
+    const points = [
+      [rect.left + rect.width / 2, rect.top + rect.height / 2],
+      [rect.left + Math.min(8, Math.max(1, rect.width / 3)), rect.top + Math.min(8, Math.max(1, rect.height / 3))],
+      [rect.right - Math.min(8, Math.max(1, rect.width / 3)), rect.bottom - Math.min(8, Math.max(1, rect.height / 3))],
+    ];
+
+    return points.some(([x, y]) => {
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+      return document.elementsFromPoint(x, y).some((node) => node === el || el.contains(node));
+    });
+  }
+
   function isQuickTextTarget(el) {
     if (!el || !visible(el)) return false;
     if (el.disabled || el.readOnly) return false;
@@ -806,21 +872,25 @@
   }
 
   function getQuickTextTarget() {
-    if (isQuickTextTarget(document.activeElement)) return document.activeElement;
-
     const activeModule = getActiveModuleName();
-    let preferred = [];
-    if (activeModule === "History / HOPI") preferred = ["hopi", "currentMedication", "chiefComplaintRemarks"];
-    else if (activeModule === "Orders / Prescriptions") preferred = ["prescriptionInstruction"];
-    else if (activeModule === "Assessment / Diagnosis") preferred = ["remarks"];
-    else if (activeModule === "Sick Leave") preferred = ["remarks"];
-    else if (activeModule === "Chief Complaint") preferred = ["chiefComplaintRemarks", "hopi"];
+    const activeScope = normalizeQuickTextScope(activeModule);
+    if (isQuickTextTarget(document.activeElement) && isForegroundElement(document.activeElement)) return document.activeElement;
 
-    const namedTarget = getFirstFieldByNames(preferred);
-    if (isQuickTextTarget(namedTarget)) return namedTarget;
+    const namedTarget = getFirstFieldByNames(getPreferredQuickTextFieldsForModule(activeModule));
+    if (isQuickTextTarget(namedTarget) && isForegroundElement(namedTarget)) return namedTarget;
+
+    if (
+      lastQuickTextField &&
+      document.contains(lastQuickTextField) &&
+      isQuickTextTarget(lastQuickTextField) &&
+      isForegroundElement(lastQuickTextField) &&
+      (!activeScope || getQuickTextScopeForTarget(lastQuickTextField) === activeScope)
+    ) {
+      return lastQuickTextField;
+    }
 
     return Array.from(document.querySelectorAll("textarea,input,[contenteditable='true']"))
-      .filter(isQuickTextTarget)[0] || null;
+      .filter((field) => isQuickTextTarget(field) && isForegroundElement(field))[0] || null;
   }
 
   function getEditableText(el) {
@@ -899,6 +969,7 @@
       option.textContent = "No saved text";
       select.appendChild(option);
       select.disabled = true;
+      refreshQuickTextPickList(root);
       return;
     }
 
@@ -906,10 +977,39 @@
     for (const item of items) {
       const option = document.createElement("option");
       option.value = item.id;
-      option.textContent = item.name;
+      option.textContent = item.trigger ? `${item.name}  ${item.trigger}` : item.name;
       select.appendChild(option);
     }
     if (items.some((item) => item.id === selected)) select.value = selected;
+    refreshQuickTextPickList(root);
+  }
+
+  function refreshQuickTextPickList(panel) {
+    const root = panel || document.getElementById(PANEL_ID);
+    if (!root) return;
+    const list = root.querySelector(".vida-pick-list");
+    if (!list) return;
+
+    list.innerHTML = "";
+    const items = getQuickTexts();
+    if (!items.length) {
+      const hint = document.createElement("div");
+      hint.className = "vida-pick-empty";
+      hint.textContent = "No saved text yet. Use Save Field to add one.";
+      list.appendChild(hint);
+      return;
+    }
+
+    for (const item of items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "vida-pick-item";
+      button.textContent = item.trigger ? `${item.name}  (${item.trigger})` : item.name;
+      // Keep focus in the clinical field when tapping (toolbar trick), so insert lands at the caret.
+      button.addEventListener("pointerdown", (event) => event.preventDefault());
+      button.addEventListener("click", () => insertQuickTextById(item.id));
+      list.appendChild(button);
+    }
   }
 
   function getSelectedQuickText() {
@@ -927,8 +1027,7 @@
     return focusElement(target, getFieldName(target) || "free-text field");
   }
 
-  function insertQuickText() {
-    const item = getSelectedQuickText();
+  function insertQuickTextItem(item) {
     if (!item) {
       setStatus("Save a text template first");
       return;
@@ -936,14 +1035,21 @@
 
     const target = getQuickTextTarget();
     if (!target) {
-      setStatus("Click a free-text field first");
+      setStatus("Tap a free-text field first");
       return;
     }
 
     insertTextIntoField(target, item.text);
-    target.style.outline = "4px solid #2563eb";
-    target.style.outlineOffset = "3px";
-    setStatus(`Inserted "${item.name}" draft; review before saving`);
+    flashFieldOutline(target);
+    setStatus(`Inserted "${item.name}" into ${describeQuickTextTarget(target)}; review before saving`);
+  }
+
+  function insertQuickText() {
+    insertQuickTextItem(getSelectedQuickText());
+  }
+
+  function insertQuickTextById(id) {
+    insertQuickTextItem(getQuickTexts().find((item) => item.id === String(id)) || null);
   }
 
   function saveCurrentFieldAsQuickText() {
@@ -974,17 +1080,41 @@
       return;
     }
 
-    const items = getQuickTexts().filter((item) => item.name.toLowerCase() !== name.toLowerCase());
-    items.unshift({
-      id: String(Date.now()),
+    const trigger = normalizeTrigger(window.prompt(
+      `Optional quick code to expand this text while typing (start with "${QUICK_TEXT_TRIGGER_SIGIL}", e.g. ${QUICK_TEXT_TRIGGER_SIGIL}htn). Leave blank for none.`,
+      ""
+    ));
+
+    const scope = getQuickTextScopeForTarget(target);
+    const existingItems = getQuickTexts();
+    const existing = existingItems.find((item) => item.name.toLowerCase() === name.toLowerCase());
+    let items = existingItems.filter((item) => item.name.toLowerCase() !== name.toLowerCase());
+    let reassigned = "";
+    if (trigger) {
+      items = items.map((item) => {
+        if (item.trigger === trigger && item.scope === scope) {
+          reassigned = item.name;
+          return Object.assign({}, item, { trigger: "" });
+        }
+        return item;
+      });
+    }
+    const savedItem = {
+      id: existing ? existing.id : String(Date.now()),
       name,
       text: text.slice(0, 4000),
-    });
+      trigger,
+      scope,
+    };
+    items.unshift(savedItem);
     setQuickTexts(items);
 
     const select = document.querySelector(`#${PANEL_ID} .vida-template-select`);
-    if (select) select.value = items[0].id;
-    setStatus(`Saved "${name}"`);
+    if (select) select.value = savedItem.id;
+    const scopeText = scope ? ` for ${scope}` : "";
+    if (trigger && reassigned) setStatus(`Saved "${name}"${scopeText}; code ${trigger} moved here from "${reassigned}"`);
+    else if (trigger) setStatus(`Saved "${name}" with code ${trigger}${scopeText}`);
+    else setStatus(`Saved "${name}"${scopeText}`);
   }
 
   function deleteSelectedQuickText() {
@@ -997,7 +1127,218 @@
     const ok = window.confirm(`Delete "${item.name}"?`);
     if (!ok) return;
     setQuickTexts(getQuickTexts().filter((current) => current.id !== item.id));
+    removeModuleDefaultsForQuickTextId(item.id);
     setStatus(`Deleted "${item.name}"`);
+  }
+
+  function normalizeTrigger(raw) {
+    const value = String(raw || "").trim().toLowerCase();
+    if (!value) return "";
+    const body = value.replace(/^\/+/, "").replace(/[^a-z0-9]/g, "");
+    if (!body) return "";
+    return `${QUICK_TEXT_TRIGGER_SIGIL}${body}`.slice(0, MAX_TRIGGER_LENGTH);
+  }
+
+  function buildTriggerIndex() {
+    quickTextTriggerIndex = new Map();
+    for (const item of getQuickTexts()) {
+      if (item.trigger) {
+        const matches = quickTextTriggerIndex.get(item.trigger) || [];
+        matches.push(item);
+        quickTextTriggerIndex.set(item.trigger, matches);
+      }
+    }
+  }
+
+  function getQuickTextForTrigger(trigger, scope) {
+    const matches = quickTextTriggerIndex.get(trigger) || [];
+    return matches.find((item) => item.scope && item.scope === scope) || matches.find((item) => !item.scope) || null;
+  }
+
+  function expansionPhraseFor(el, text) {
+    const tag = String(el && el.tagName || "").toLowerCase();
+    if (tag === "input") return String(text || "").replace(/[\r\n]+/g, " ");
+    return String(text || "");
+  }
+
+  function handleExpansionInput(event) {
+    if (expansionInProgress) return;
+    if (!quickTextTriggerIndex.size) return;
+    if (event.isComposing) return;
+
+    const data = event.data;
+    const isTerminatorInput =
+      (typeof data === "string" && data.length === 1 && /[\s.,;:!?]/.test(data)) ||
+      event.inputType === "insertLineBreak" ||
+      event.inputType === "insertParagraph";
+    if (!isTerminatorInput) return;
+
+    const el = event.target;
+    if (!el || el.isContentEditable) return;
+    if (!isQuickTextTarget(el)) return;
+    if (typeof el.selectionStart !== "number") return;
+
+    const caret = el.selectionStart;
+    const value = getEditableText(el);
+    const beforeCaret = value.slice(0, caret);
+    if (!/[\s.,;:!?]$/.test(beforeCaret)) return;
+
+    const beforeTerminator = beforeCaret.slice(0, -1);
+    const slashIndex = beforeTerminator.lastIndexOf(QUICK_TEXT_TRIGGER_SIGIL);
+    if (slashIndex < 0) return;
+    if (slashIndex > 0 && !/[\s.,;:!?(){}\[\]]/.test(beforeTerminator[slashIndex - 1])) return;
+
+    const token = beforeTerminator.slice(slashIndex).toLowerCase();
+    if (token.length < 2 || token.length > MAX_TRIGGER_LENGTH) return;
+    const scope = getQuickTextScopeForTarget(el);
+    const item = getQuickTextForTrigger(token, scope);
+    if (!item) return;
+
+    const phrase = expansionPhraseFor(el, item.text);
+    const terminatorAndRest = value.slice(caret - 1);
+    const nextValue = `${value.slice(0, slashIndex)}${phrase}${terminatorAndRest}`;
+    const nextCaret = slashIndex + phrase.length + 1;
+
+    expansionInProgress = true;
+    try {
+      setNativeValue(el, nextValue);
+      if (typeof el.setSelectionRange === "function") el.setSelectionRange(nextCaret, nextCaret);
+      dispatchTextEvents(el, phrase);
+    } finally {
+      expansionInProgress = false;
+    }
+
+    lastExpansion = {
+      el,
+      previousValue: value,
+      previousCaret: caret,
+      resultValue: nextValue,
+      trigger: token,
+    };
+    flashFieldOutline(el);
+    setStatus(`Expanded "${token}" into ${describeQuickTextTarget(el)}; Alt+Shift+Z to undo`);
+  }
+
+  function flashFieldOutline(el) {
+    if (!el || !el.style) return;
+    el.style.outline = "3px solid #2563eb";
+    el.style.outlineOffset = "2px";
+    setTimeout(() => {
+      if (!el || !el.style) return;
+      el.style.outline = "";
+      el.style.outlineOffset = "";
+    }, 1500);
+  }
+
+  function undoLastExpansion() {
+    const last = lastExpansion;
+    if (!last || !last.el || !document.contains(last.el)) {
+      setStatus("Nothing to undo");
+      return;
+    }
+    const el = last.el;
+    if (getEditableText(el) !== last.resultValue) {
+      lastExpansion = null;
+      setStatus("Cannot undo: text changed since expansion");
+      return;
+    }
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+    expansionInProgress = true;
+    try {
+      setNativeValue(el, last.previousValue);
+      if (typeof el.setSelectionRange === "function") el.setSelectionRange(last.previousCaret, last.previousCaret);
+      dispatchTextEvents(el, last.trigger);
+    } finally {
+      expansionInProgress = false;
+    }
+    lastExpansion = null;
+    setStatus("Expansion undone");
+  }
+
+  function trackQuickTextFocus(event) {
+    const el = event && event.target;
+    if (isQuickTextTarget(el)) lastQuickTextField = el;
+  }
+
+  function installExpansion() {
+    if (window[EXPANSION_INSTALLED_KEY]) return;
+    window[EXPANSION_INSTALLED_KEY] = true;
+    buildTriggerIndex();
+    document.addEventListener("input", handleExpansionInput, true);
+    document.addEventListener("focusin", trackQuickTextFocus, true);
+  }
+
+  function getModuleDefaultsRaw() {
+    if (typeof GM_getValue === "function") return GM_getValue(MODULE_DEFAULT_KEY, "{}");
+    return localStorage.getItem(MODULE_DEFAULT_KEY) || "{}";
+  }
+
+  function setModuleDefaultsRaw(value) {
+    if (typeof GM_setValue === "function") {
+      GM_setValue(MODULE_DEFAULT_KEY, value);
+      return;
+    }
+    localStorage.setItem(MODULE_DEFAULT_KEY, value);
+  }
+
+  function getModuleDefaults() {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(getModuleDefaultsRaw());
+    } catch (_error) {
+      parsed = {};
+    }
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  }
+
+  function getModuleDefaultId(module) {
+    return String(getModuleDefaults()[module] || "");
+  }
+
+  function setModuleDefault(module, id) {
+    const map = getModuleDefaults();
+    if (id) map[module] = id;
+    else delete map[module];
+    setModuleDefaultsRaw(JSON.stringify(map));
+  }
+
+  function removeModuleDefaultsForQuickTextId(id) {
+    const map = getModuleDefaults();
+    let changed = false;
+    for (const module of Object.keys(map)) {
+      if (String(map[module]) === String(id)) {
+        delete map[module];
+        changed = true;
+      }
+    }
+    if (changed) setModuleDefaultsRaw(JSON.stringify(map));
+  }
+
+  function setCurrentAsModuleDefault() {
+    const item = getSelectedQuickText();
+    if (!item) {
+      setStatus("Select a saved text first");
+      return;
+    }
+    const module = getActiveModuleName();
+    setModuleDefault(module, item.id);
+    lastSyncedModule = module;
+    setStatus(`"${item.name}" is now default for ${module}`);
+  }
+
+  function syncModuleDefaultSelection() {
+    const select = document.querySelector(`#${PANEL_ID} .vida-template-select`);
+    if (!select || select.disabled) return;
+    const module = getActiveModuleName();
+    if (module === lastSyncedModule) return;
+    lastSyncedModule = module;
+    if (userChosenModules.has(module)) return;
+    const defaultId = getModuleDefaultId(module);
+    if (defaultId && Array.from(select.options).some((option) => option.value === defaultId)) {
+      select.value = defaultId;
+    } else if (defaultId) {
+      setModuleDefault(module, "");
+    }
   }
 
   function focusPatientSearch() {
@@ -1491,7 +1832,7 @@
     document.addEventListener("keydown", (event) => {
       if (!event.altKey || !event.shiftKey) return;
       const key = String(event.key || "").toLowerCase();
-      if (isTypingTarget(event.target) && key !== "t") return;
+      if (isTypingTarget(event.target) && key !== "t" && key !== "z") return;
       if (key === "n") {
         event.preventDefault();
         nextSafeStep();
@@ -1507,6 +1848,9 @@
       } else if (key === "t") {
         event.preventDefault();
         insertQuickText();
+      } else if (key === "z") {
+        event.preventDefault();
+        undoLastExpansion();
       } else if (key === "d") {
         event.preventDefault();
         goDashboard();
@@ -1576,17 +1920,21 @@
     let startTop = 0;
     let dragging = false;
 
-    handle.addEventListener("mousedown", (event) => {
+    handle.style.touchAction = "none";
+    handle.addEventListener("pointerdown", (event) => {
       dragging = true;
       const rect = panel.getBoundingClientRect();
       startX = event.clientX;
       startY = event.clientY;
       startLeft = rect.left;
       startTop = rect.top;
+      if (typeof handle.setPointerCapture === "function") {
+        try { handle.setPointerCapture(event.pointerId); } catch (_error) { /* ignore */ }
+      }
       event.preventDefault();
     });
 
-    document.addEventListener("mousemove", (event) => {
+    handle.addEventListener("pointermove", (event) => {
       if (!dragging) return;
       const nextLeft = Math.max(8, Math.min(startLeft + event.clientX - startX, window.innerWidth - panel.offsetWidth - 8));
       const nextTop = Math.max(8, Math.min(startTop + event.clientY - startY, window.innerHeight - 48));
@@ -1596,11 +1944,13 @@
       panel.style.top = `${nextTop}px`;
     });
 
-    document.addEventListener("mouseup", () => {
+    const endDrag = () => {
       if (!dragging) return;
       dragging = false;
       savePanelPosition(panel);
-    });
+    };
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
   }
 
   function buildPanel() {
@@ -1688,6 +2038,55 @@
         padding: 4px 6px;
         font-size: 12px;
       }
+      #${PANEL_ID} .vida-pick-toggle {
+        width: 100%;
+        min-height: 34px;
+        margin-top: 2px;
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        border-radius: 7px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      #${PANEL_ID} .vida-pick-list {
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 240px;
+        overflow-y: auto;
+        margin-top: 4px;
+        -webkit-overflow-scrolling: touch;
+      }
+      #${PANEL_ID} .vida-pick-list.open {
+        display: flex;
+      }
+      #${PANEL_ID} .vida-pick-item {
+        width: 100%;
+        min-height: 44px;
+        text-align: left;
+        padding: 8px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        color: #0f172a;
+        font-size: 14px;
+        white-space: normal;
+        line-height: 1.25;
+      }
+      #${PANEL_ID} .vida-pick-item:active {
+        background: #dbeafe;
+      }
+      #${PANEL_ID} .vida-pick-empty {
+        font-size: 12px;
+        color: #64748b;
+        padding: 6px 2px;
+      }
+      @media (pointer: coarse) {
+        #${PANEL_ID} { max-width: 92vw; }
+        #${PANEL_ID} .vida-body button { min-height: 44px; font-size: 14px; }
+        #${PANEL_ID} .vida-template-select { min-height: 44px; font-size: 14px; }
+      }
       #${PANEL_ID} .vida-status {
         min-height: 18px;
         font-size: 12px;
@@ -1719,7 +2118,10 @@
           <button type="button" data-action="save-text">Save Field</button>
           <button type="button" data-action="focus-text">Find Text</button>
           <button type="button" data-action="delete-text">Delete Text</button>
+          <button type="button" data-action="default-text">Default Here</button>
         </div>
+        <button type="button" data-action="toggle-pick" class="vida-pick-toggle">Tap to Insert</button>
+        <div class="vida-pick-list" aria-label="Tap a saved text to insert"></div>
         <div class="vida-quick">
           <button type="button" data-nav="Vitals">Vitals</button>
           <button type="button" data-nav="Chief Complaint">Chief</button>
@@ -1757,10 +2159,21 @@
     panel.querySelector('[data-action="next-safe"]').addEventListener("click", nextSafeStep);
     panel.querySelector('[data-action="focus-current"]').addEventListener("click", focusCurrentModuleField);
     panel.querySelector('[data-action="check-rx"]').addEventListener("click", checkPrescriptionFields);
-    panel.querySelector('[data-action="insert-text"]').addEventListener("click", insertQuickText);
+    const insertButton = panel.querySelector('[data-action="insert-text"]');
+    insertButton.addEventListener("pointerdown", (event) => event.preventDefault());
+    insertButton.addEventListener("click", insertQuickText);
     panel.querySelector('[data-action="save-text"]').addEventListener("click", saveCurrentFieldAsQuickText);
     panel.querySelector('[data-action="focus-text"]').addEventListener("click", focusQuickTextTarget);
     panel.querySelector('[data-action="delete-text"]').addEventListener("click", deleteSelectedQuickText);
+    panel.querySelector('[data-action="default-text"]').addEventListener("click", setCurrentAsModuleDefault);
+    const pickList = panel.querySelector(".vida-pick-list");
+    panel.querySelector('[data-action="toggle-pick"]').addEventListener("click", () => {
+      if (pickList) pickList.classList.toggle("open");
+    });
+    const templateSelect = panel.querySelector(".vida-template-select");
+    if (templateSelect) {
+      templateSelect.addEventListener("change", () => userChosenModules.add(getActiveModuleName()));
+    }
     for (const button of panel.querySelectorAll("[data-nav]")) {
       button.addEventListener("click", () => clickSafeNav(button.getAttribute("data-nav")));
     }
@@ -1799,8 +2212,10 @@
     if (!document.body) return;
     installNetworkRecorder();
     installKeyboardShortcuts();
+    installExpansion();
     buildPanel();
     updateCounts();
+    syncModuleDefaultSelection();
   }
 
   installNetworkRecorder();
