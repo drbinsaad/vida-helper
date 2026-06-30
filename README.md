@@ -9,8 +9,9 @@ Safe starter kit for building a VIDA browser helper that can run on:
 The current dashboard script is a safe workflow helper. It highlights VIDA
 fields/buttons, captures sanitized snapshots, inserts your own saved quick-text
 templates into free-text fields, and can save/apply local medication draft
-presets for prescription drawers. It does not click Add, Continue, or Save for
-patient-record actions.
+presets for prescription drawers. It can also copy/mark previous prescription
+cards so you can review them before manually using Refill. It does not click
+Add, Continue, Refill, or Save for patient-record actions.
 
 ## What I learned from the public app
 
@@ -44,7 +45,9 @@ free-text field, type a reusable phrase once, press `Save Field`, then use
 `Insert Text` later to draft it into the active field for manual review. For
 common medications, open a prescription drawer after choosing the medication and
 details, press `Save Rx`, then later use `Find Med`, `Apply Rx`, and `Copy Rx`
-to speed up drafting while keeping Add/Save manual.
+to speed up drafting while keeping Add/Save manual. On the `Previous
+Prescriptions` list, tap a previous prescription card, then use `Copy Prev` or
+`Mark Prev`; the `Refill` click stays manual.
 
 Paste that snapshot back here after checking it has no patient name, MRN, phone,
 or ID number. Then I can build the exact action script for your workflow.

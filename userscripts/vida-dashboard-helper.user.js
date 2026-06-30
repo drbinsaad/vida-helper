@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.11.0
+// @version      1.11.1
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,12 +14,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.11.0";
+  const VERSION = "1.11.1";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
   const NETWORK_INSTALLED_KEY = "__vidaHelperNetworkRecorderInstalled";
   const KEYBOARD_INSTALLED_KEY = "__vidaHelperKeyboardInstalled";
+  const PREVIOUS_RX_TRACKER_INSTALLED_KEY = "__vidaHelperPreviousRxTrackerInstalled";
   const PANEL_POSITION_KEY = "__vidaHelperPanelPosition";
   const PANEL_COLLAPSED_KEY = "__vidaHelperPanelCollapsed";
   const QUICK_TEXT_KEY = "__vidaHelperQuickTexts";
@@ -33,6 +34,7 @@
   let lastExpansion = null;
   let expansionInProgress = false;
   let lastQuickTextField = null;
+  let lastPreviousRxCard = null;
   const userChosenModules = new Set();
   const QUICK_TEXT_FIELD_NAMES = [
     "hopi",
@@ -685,6 +687,7 @@
         ...findButtonsByText("Previous Prescriptions"),
         ...findExactElementsByText("Previous Prescriptions"),
       ]).length,
+      previousPrescriptionCards: getPreviousRxCards().length,
       refillButtons: findButtonsByText("Refill").length,
       deleteControls: getDeleteControls().length,
       prescriptionEntryFields: PRESCRIPTION_FIELD_NAMES.filter((name) => getFieldsByName(name).length).length,
@@ -1201,6 +1204,125 @@
     const reviewText = review.length ? `; review ${review.join(", ")}` : "";
     const copiedText = medicationQuery ? "; med name copied" : "";
     setStatus(`${filledText}${skippedText}${missingText}${reviewText}${copiedText}; Add/Save manual`);
+  }
+
+  function hasPreviousRxText(el) {
+    const text = textOf(el);
+    return /\bDetail\s*:/i.test(text) && /\bSTART\s*DATE\s*:/i.test(text);
+  }
+
+  function getPreviousRxCardFromElement(el) {
+    let current = el;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      if (current.id === PANEL_ID || current === document.body || current === document.documentElement) return null;
+      if (visible(current) && hasPreviousRxText(current)) {
+        const refills = Array.from(current.querySelectorAll("button,a,[role='button']")).filter(visible).filter((node) => /refill/i.test(textOf(node)));
+        if (refills.length <= 1) return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function getPreviousRxCards() {
+    const cards = [];
+    for (const refill of findButtonsByText("Refill")) {
+      const card = getPreviousRxCardFromElement(refill);
+      if (!card) continue;
+      cards.push({ card, refill, text: cleanPreviousRxText(textOf(card)) });
+    }
+
+    return uniqueElements(cards.map((item) => item.card))
+      .map((card) => cards.find((item) => item.card === card))
+      .filter((item) => item && item.text);
+  }
+
+  function cleanPreviousRxText(raw) {
+    return norm(raw)
+      .replace(/\bOrdered\b/gi, " ")
+      .replace(/\bRefill\b/gi, " ")
+      .replace(/\bBy\s*:\s*.*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 1200);
+  }
+
+  function getActivePreviousRxCard() {
+    if (lastPreviousRxCard && document.contains(lastPreviousRxCard) && visible(lastPreviousRxCard)) {
+      const refill = Array.from(lastPreviousRxCard.querySelectorAll("button,a,[role='button']")).filter(visible).find((node) => /refill/i.test(textOf(node))) || null;
+      return { card: lastPreviousRxCard, refill, text: cleanPreviousRxText(textOf(lastPreviousRxCard)) };
+    }
+
+    const cards = getPreviousRxCards();
+    if (!cards.length) return null;
+    const viewportMiddle = window.innerHeight / 2;
+    return cards
+      .slice()
+      .sort((a, b) => Math.abs(a.card.getBoundingClientRect().top - viewportMiddle) - Math.abs(b.card.getBoundingClientRect().top - viewportMiddle))[0];
+  }
+
+  function markPreviousRxCard(item, selected) {
+    if (!item || !item.card) return 0;
+    item.card.style.outline = selected ? "4px solid #2563eb" : "3px solid #4338ca";
+    item.card.style.outlineOffset = "2px";
+    item.card.title = selected ? "VIDA helper selected previous prescription" : "VIDA helper previous prescription";
+    if (item.refill) {
+      item.refill.style.outline = "4px solid #ea580c";
+      item.refill.style.outlineOffset = "2px";
+      item.refill.title = "VIDA helper caution: Refill remains a manual patient-record action";
+    }
+    return item.refill ? 2 : 1;
+  }
+
+  function markPreviousRxCards() {
+    const cards = getPreviousRxCards();
+    let count = 0;
+    for (const item of cards) count += markPreviousRxCard(item, false);
+
+    for (const search of getPlaceholderControls("Search")) {
+      search.style.outline = "3px solid #2563eb";
+      search.style.outlineOffset = "2px";
+      search.title = "VIDA helper previous-prescription search";
+      count += 1;
+    }
+
+    if (cards.length) setStatus(`Marked ${cards.length} previous Rx cards; Refill manual`);
+    else setStatus("No previous Rx cards found");
+    return count;
+  }
+
+  function copyPreviousRxCard() {
+    const item = getActivePreviousRxCard();
+    if (!item || !item.text) {
+      setStatus("Tap a previous Rx card first, or scroll to one");
+      return;
+    }
+
+    lastPreviousRxCard = item.card;
+    markPreviousRxCard(item, true);
+    copy(item.text)
+      .then(() => setStatus("Copied previous Rx details; Refill/Add/Save manual"))
+      .catch((error) => setStatus(`Copy failed: ${error && error.message || error}`));
+  }
+
+  function trackPreviousRxCardClick(event) {
+    const target = event && event.target;
+    if (!target || target.closest && target.closest(`#${PANEL_ID}`)) return;
+    const card = getPreviousRxCardFromElement(target);
+    if (!card) return;
+    lastPreviousRxCard = card;
+    markPreviousRxCard({
+      card,
+      refill: Array.from(card.querySelectorAll("button,a,[role='button']")).filter(visible).find((node) => /refill/i.test(textOf(node))) || null,
+      text: cleanPreviousRxText(textOf(card)),
+    }, true);
+    setStatus("Previous Rx card selected; Refill remains manual");
+  }
+
+  function installPreviousRxTracker() {
+    if (window[PREVIOUS_RX_TRACKER_INSTALLED_KEY]) return;
+    window[PREVIOUS_RX_TRACKER_INSTALLED_KEY] = true;
+    document.addEventListener("click", trackPreviousRxCardClick, true);
   }
 
   function getFieldName(el) {
@@ -2641,6 +2763,8 @@
           <button type="button" data-action="copy-rx">Copy Rx</button>
           <button type="button" data-action="focus-rx">Find Med</button>
           <button type="button" data-action="delete-rx">Delete Rx</button>
+          <button type="button" data-action="copy-prev-rx">Copy Prev</button>
+          <button type="button" data-action="mark-prev-rx">Mark Prev</button>
         </div>
         <select class="vida-template-select" aria-label="Saved quick text"></select>
         <div class="vida-quick">
@@ -2694,6 +2818,8 @@
     panel.querySelector('[data-action="copy-rx"]').addEventListener("click", copySelectedRxPreset);
     panel.querySelector('[data-action="focus-rx"]').addEventListener("click", focusMedicationSearch);
     panel.querySelector('[data-action="delete-rx"]').addEventListener("click", deleteSelectedRxPreset);
+    panel.querySelector('[data-action="copy-prev-rx"]').addEventListener("click", copyPreviousRxCard);
+    panel.querySelector('[data-action="mark-prev-rx"]').addEventListener("click", markPreviousRxCards);
     const insertButton = panel.querySelector('[data-action="insert-text"]');
     insertButton.addEventListener("pointerdown", (event) => event.preventDefault());
     insertButton.addEventListener("click", insertQuickText);
@@ -2751,6 +2877,7 @@
     installNetworkRecorder();
     installKeyboardShortcuts();
     installExpansion();
+    installPreviousRxTracker();
     buildPanel();
     updateCounts();
     syncModuleDefaultSelection();
