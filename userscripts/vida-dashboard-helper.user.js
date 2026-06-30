@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.12.1
+// @version      1.12.2
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.12.1";
+  const VERSION = "1.12.2";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -2905,6 +2905,12 @@
       } else if (key === "r") {
         event.preventDefault();
         checkPrescriptionFields();
+      } else if (key === "i") {
+        event.preventDefault();
+        focusIcdSearch();
+      } else if (key === "x") {
+        event.preventDefault();
+        applySelectedDxPreset();
       } else if (key === "t") {
         event.preventDefault();
         insertQuickText();

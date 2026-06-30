@@ -50,6 +50,8 @@ to speed up drafting while keeping Add/Save manual. `Find Item` also focuses the
 procedure search on the `Orders` tab, but Rx drafts stay limited to
 `Prescriptions`. For common assessments, open `Assessment`, choose the ICD and
 write remarks once, press `Save Dx`, then later use `Find ICD` and `Apply Dx`.
+Keyboard shortcuts: `Alt+Shift+I` finds ICD, and `Alt+Shift+X` applies the
+selected Dx draft.
 On the `Previous Prescriptions` list, tap a previous prescription card, then use
 `Copy Prev` or `Mark Prev`; the `Refill` click stays manual.
 
