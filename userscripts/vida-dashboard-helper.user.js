@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VIDA Dashboard Helper
 // @namespace    https://vida.hmg.com/
-// @version      1.10.1
+// @version      1.10.2
 // @description  Workflow helper for VIDA dashboard and OPD details. Quick code text expansion. Safe: no automatic patient action clicks.
 // @match        *://vida.hmg.com/*
 // @match        *://*.vida.hmg.com/*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.10.1";
+  const VERSION = "1.10.2";
   const RED = "#d02127";
   const PANEL_ID = "vida-dash-helper";
   const NETWORK_LOG_KEY = "__vidaHelperNetworkLog";
@@ -47,6 +47,21 @@
     "Orders / Prescriptions",
     "Assessment / Diagnosis",
     "Sick Leave",
+  ];
+  const RICH_EDITOR_SELECTORS = [
+    "iframe",
+    "[contenteditable='true']",
+    ".tox-edit-area iframe",
+    ".mce-edit-area iframe",
+    ".tox-tinymce",
+    ".mce-tinymce",
+    ".e-richtexteditor",
+    ".e-rte-content",
+    ".note-editor",
+    ".note-editable",
+    ".ql-editor",
+    ".ck-editor__editable",
+    ".fr-element",
   ];
   const PRESCRIPTION_FIELD_NAMES = [
     "item",
@@ -471,6 +486,7 @@
       return "Encounter Review / Loading";
     }
     if (fields.has("weightKg") || fields.has("temperatureCelcius") || fields.has("pulseBeatPerMinute")) return "Vitals";
+    if (getChiefComplaintEditor()) return "Chief Complaint";
     if (fields.has("hopi")) return "History / HOPI";
     if (
       (fields.has("noOfDays") || fields.has("startDate")) &&
@@ -808,7 +824,85 @@
   }
 
   function getFieldName(el) {
+    if (isChiefComplaintEditor(el)) return "chiefComplaintRichText";
     return String(el && (el.getAttribute("formcontrolname") || el.getAttribute("name") || "") || "");
+  }
+
+  function getFrameDocument(frame) {
+    try {
+      return frame && frame.contentDocument && frame.contentDocument.body ? frame.contentDocument : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function getRichEditorBody(el) {
+    if (!el) return null;
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "iframe") {
+      const doc = getFrameDocument(el);
+      return doc && doc.body ? doc.body : null;
+    }
+    const iframe = el.querySelector && el.querySelector("iframe");
+    if (iframe) {
+      const doc = getFrameDocument(iframe);
+      if (doc && doc.body) return doc.body;
+    }
+    if (el.isContentEditable) return el;
+    const editable = el.querySelector && el.querySelector("[contenteditable='true'], .note-editable, .ql-editor, .ck-editor__editable, .fr-element");
+    return editable || null;
+  }
+
+  function isSameOriginFrame(frame) {
+    if (!frame || String(frame.tagName || "").toLowerCase() !== "iframe") return false;
+    const src = frame.getAttribute("src") || "";
+    if (src) {
+      try {
+        const url = new URL(src, location.href);
+        if (url.origin !== location.origin && url.protocol !== "about:") return false;
+      } catch (_error) {
+        return false;
+      }
+    }
+    return Boolean(getFrameDocument(frame));
+  }
+
+  function isRichEditorElement(el) {
+    if (!el || !visible(el)) return false;
+    if (el.isContentEditable) return true;
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "iframe") return isSameOriginFrame(el);
+    if (el.matches && el.matches(".tox-tinymce,.mce-tinymce,.e-richtexteditor,.e-rte-content,.note-editor,.note-editable,.ql-editor,.ck-editor__editable,.fr-element")) {
+      return Boolean(getRichEditorBody(el));
+    }
+    return false;
+  }
+
+  function getRichTextEditors() {
+    return uniqueElements(
+      RICH_EDITOR_SELECTORS.flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+    ).filter(isRichEditorElement);
+  }
+
+  function getChiefComplaintEditor() {
+    const editors = getRichTextEditors();
+    if (!editors.length) return null;
+
+    const labelled = editors.find((editor) => {
+      let current = editor;
+      for (let depth = 0; current && depth < 5; depth += 1) {
+        if (/chief\s*complaints?/i.test(textOf(current))) return true;
+        current = current.parentElement;
+      }
+      return false;
+    });
+    return labelled || editors[0] || null;
+  }
+
+  function isChiefComplaintEditor(el) {
+    if (!el) return false;
+    const editor = getChiefComplaintEditor();
+    return Boolean(editor && (editor === el || editor.contains(el) || el.contains(editor)));
   }
 
   function normalizeQuickTextScope(raw) {
@@ -817,18 +911,19 @@
   }
 
   function getPreferredQuickTextFieldsForModule(module) {
+    if (module === "Chief Complaint") return ["chiefComplaintRichText", "chiefComplaintRemarks", "hopi"];
     if (module === "History / HOPI") return ["hopi", "currentMedication", "chiefComplaintRemarks"];
     if (module === "Current Medication") return ["currentMedication", "hopi"];
     if (module === "Orders / Prescriptions") return ["prescriptionInstruction"];
     if (module === "Assessment / Diagnosis") return ["remarks"];
     if (module === "Sick Leave") return ["remarks"];
-    if (module === "Chief Complaint") return ["chiefComplaintRemarks", "hopi"];
     return [];
   }
 
   function getQuickTextScopeForTarget(el) {
     const activeModule = getActiveModuleName();
     const name = getFieldName(el);
+    if (isChiefComplaintEditor(el) || name === "chiefComplaintRichText") return "Chief Complaint";
     if (name === "hopi") return "History / HOPI";
     if (name === "currentMedication") return "Current Medication";
     if (name === "chiefComplaintRemarks") return "Chief Complaint";
@@ -838,6 +933,7 @@
   }
 
   function describeQuickTextTarget(el) {
+    if (isChiefComplaintEditor(el)) return "Chief Complaints editor";
     return getFieldName(el) || getQuickTextScopeForTarget(el) || "free-text field";
   }
 
@@ -858,6 +954,7 @@
 
   function isQuickTextTarget(el) {
     if (!el || !visible(el)) return false;
+    if (isRichEditorElement(el)) return true;
     if (el.disabled || el.readOnly) return false;
     if (el.isContentEditable) return true;
     const tag = String(el.tagName || "").toLowerCase();
@@ -876,7 +973,10 @@
     const activeScope = normalizeQuickTextScope(activeModule);
     if (isQuickTextTarget(document.activeElement) && isForegroundElement(document.activeElement)) return document.activeElement;
 
-    const namedTarget = getFirstFieldByNames(getPreferredQuickTextFieldsForModule(activeModule));
+    const preferred = getPreferredQuickTextFieldsForModule(activeModule);
+    const namedTarget = preferred.includes("chiefComplaintRichText")
+      ? getChiefComplaintEditor() || getFirstFieldByNames(preferred.filter((name) => name !== "chiefComplaintRichText"))
+      : getFirstFieldByNames(preferred);
     if (isQuickTextTarget(namedTarget) && isForegroundElement(namedTarget)) return namedTarget;
 
     if (
@@ -895,6 +995,8 @@
 
   function getEditableText(el) {
     if (!el) return "";
+    const richBody = getRichEditorBody(el);
+    if (richBody && richBody !== el) return richBody.innerText || richBody.textContent || "";
     if (el.isContentEditable) return el.innerText || el.textContent || "";
     return String(el.value || "");
   }
@@ -925,10 +1027,43 @@
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  function appendTextToRichEditorBody(body, text) {
+    const doc = body.ownerDocument || document;
+    if (norm(body.innerText || body.textContent)) body.appendChild(doc.createElement("br"));
+    String(text || "").split(/\r?\n/).forEach((line, index) => {
+      if (index > 0) body.appendChild(doc.createElement("br"));
+      body.appendChild(doc.createTextNode(line));
+    });
+  }
+
+  function insertTextIntoRichEditor(el, text) {
+    const body = getRichEditorBody(el);
+    if (!body) return false;
+    const doc = body.ownerDocument || document;
+    const win = doc.defaultView || window;
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+    if (typeof win.focus === "function") win.focus();
+    if (typeof body.focus === "function") body.focus({ preventScroll: true });
+
+    const selection = win.getSelection && win.getSelection();
+    const hasEditorSelection = selection && selection.rangeCount && body.contains(selection.anchorNode);
+    if (hasEditorSelection && typeof doc.execCommand === "function") {
+      doc.execCommand("insertText", false, text);
+    } else {
+      appendTextToRichEditorBody(body, text);
+    }
+
+    dispatchTextEvents(body, text);
+    if (body !== el) dispatchTextEvents(el, text);
+    return true;
+  }
+
   function insertTextIntoField(el, text) {
     if (!el || !text) return false;
     el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
     if (typeof el.focus === "function") el.focus({ preventScroll: true });
+
+    if (isRichEditorElement(el)) return insertTextIntoRichEditor(el, text);
 
     if (el.isContentEditable) {
       const selection = window.getSelection && window.getSelection();
@@ -1349,6 +1484,7 @@
     const activeModule = getActiveModuleName();
     if (activeModule === "Patient List") return focusPatientSearch();
     if (activeModule === "Vitals") return focusElement(getFirstFieldByNames(["weightKg", "temperatureCelcius", "pulseBeatPerMinute", "bloodPressureHigher", "painScore"]), "vitals field");
+    if (activeModule === "Chief Complaint") return focusElement(getChiefComplaintEditor() || getFirstFieldByNames(["chiefComplaintRemarks", "hopi"]), "chief complaint editor");
     if (activeModule === "History / HOPI" || activeModule === "Current Medication") return focusElement(getFirstFieldByNames(["hopi", "drug", "dose", "currentMedication"]), "history field");
     if (activeModule === "Assessment / Diagnosis") return focusElement(getFirstFieldByNames(["icdCode10ID", "conditionID", "diagnosisTypeID", "remarks"]), "assessment field");
     if (activeModule === "Orders / Prescriptions") return focusElement(getFirstFieldByNames(["item", "dose", "strength", "route", "frequency", "duration"]), "prescription field");
