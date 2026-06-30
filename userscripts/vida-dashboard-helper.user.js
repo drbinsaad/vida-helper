@@ -1356,9 +1356,11 @@
 
   function flashFieldOutline(el) {
     if (!el || !el.style) return;
+    if (el.__vidaOutlineTimer) clearTimeout(el.__vidaOutlineTimer);
     el.style.outline = "3px solid #2563eb";
     el.style.outlineOffset = "2px";
-    setTimeout(() => {
+    el.__vidaOutlineTimer = setTimeout(() => {
+      el.__vidaOutlineTimer = null;
       if (!el || !el.style) return;
       el.style.outline = "";
       el.style.outlineOffset = "";
@@ -2070,7 +2072,7 @@
       event.preventDefault();
     });
 
-    handle.addEventListener("pointermove", (event) => {
+    const onMove = (event) => {
       if (!dragging) return;
       const nextLeft = Math.max(8, Math.min(startLeft + event.clientX - startX, window.innerWidth - panel.offsetWidth - 8));
       const nextTop = Math.max(8, Math.min(startTop + event.clientY - startY, window.innerHeight - 48));
@@ -2078,15 +2080,17 @@
       panel.style.bottom = "auto";
       panel.style.left = `${nextLeft}px`;
       panel.style.top = `${nextTop}px`;
-    });
-
+    };
     const endDrag = () => {
       if (!dragging) return;
       dragging = false;
       savePanelPosition(panel);
     };
-    handle.addEventListener("pointerup", endDrag);
-    handle.addEventListener("pointercancel", endDrag);
+    // Bind on document so the drag tracks even when setPointerCapture is unavailable
+    // (e.g. old Android WebViews); captured pointer events still bubble here too.
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", endDrag);
+    document.addEventListener("pointercancel", endDrag);
   }
 
   function buildPanel() {
@@ -2303,7 +2307,9 @@
     panel.querySelector('[data-action="delete-text"]').addEventListener("click", deleteSelectedQuickText);
     panel.querySelector('[data-action="default-text"]').addEventListener("click", setCurrentAsModuleDefault);
     const pickList = panel.querySelector(".vida-pick-list");
-    panel.querySelector('[data-action="toggle-pick"]').addEventListener("click", () => {
+    const pickToggle = panel.querySelector('[data-action="toggle-pick"]');
+    pickToggle.addEventListener("pointerdown", (event) => event.preventDefault());
+    pickToggle.addEventListener("click", () => {
       if (pickList) pickList.classList.toggle("open");
     });
     const templateSelect = panel.querySelector(".vida-template-select");
